@@ -352,6 +352,56 @@ def open_all_files_settings():
         return False
 
 
+_PLAYBACK_SERVICE = "org.musicbox.musicbox.KeepAliveService"
+
+
+def start_playback_service(title=None, cover=None, playing=True):
+    """Uruchamia foreground service i aktualizuje powiadomienie (title/cover/playing)."""
+    if not _ANDROID:
+        return False
+    try:
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        activity = _activity()
+        intent = Intent()
+        intent.setClassName(activity.getPackageName(), _PLAYBACK_SERVICE)
+        if title:
+            intent.putExtra("title", title)
+        if cover:
+            intent.putExtra("cover", cover)
+        intent.putExtra("playing", bool(playing))
+        if android_api_level() >= 26:
+            activity.startForegroundService(intent)
+        else:
+            activity.startService(intent)
+        return True
+    except Exception:
+        return False
+
+
+def set_playback_paused(paused):
+    """Zmienia stan powiadomienia (pauza/wznowienie) bez zatrzymywania serwisu."""
+    return start_playback_service(playing=not paused)
+
+
+def stop_playback_service():
+    """Zatrzymuje foreground service (pauza/stop/koniec odtwarzania)."""
+    if not _ANDROID:
+        return False
+    try:
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        activity = _activity()
+        intent = Intent()
+        intent.setClassName(activity.getPackageName(), _PLAYBACK_SERVICE)
+        activity.stopService(intent)
+        return True
+    except Exception:
+        return False
+
+
 def resolve_playlist_path(uri):
     """Zwraca path, ktora nadaje sie do Playlist.load_m3u.
 
@@ -425,16 +475,19 @@ def android_api_level():
 
 
 def request_storage_permissions(callback=None):
-    """Prosi o uprawnienia dostepu do plikow w runtime (Android)."""
+    """Prosi o uprawnienia dostepu do plikow i powiadomien w runtime."""
     if not _ANDROID:
         return False
     try:
-        from android.permissions import request_permissions, Permission
+        from android.permissions import request_permissions
 
         if android_api_level() >= 33:
-            perms = [Permission.READ_MEDIA_AUDIO]
+            perms = [
+                "android.permission.READ_MEDIA_AUDIO",
+                "android.permission.POST_NOTIFICATIONS",
+            ]
         else:
-            perms = [Permission.READ_EXTERNAL_STORAGE]
+            perms = ["android.permission.READ_EXTERNAL_STORAGE"]
         request_permissions(perms, callback)
         return True
     except Exception:

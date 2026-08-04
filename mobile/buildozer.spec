@@ -7,7 +7,7 @@ source.dir = .
 source.include_exts = py,kv,atl
 source.include_patterns = assets/*.png
 
-version = 0.3.0
+version = 0.3.7
 
 requirements = hostpython3==3.11.9,python3==3.11.9,kivy==2.3.0,kivymd==1.2.0,pyjnius,plyer,mutagen
 
@@ -17,7 +17,7 @@ p4a.update = False
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,READ_MEDIA_AUDIO,MANAGE_EXTERNAL_STORAGE
+android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,READ_MEDIA_AUDIO,MANAGE_EXTERNAL_STORAGE,FOREGROUND_SERVICE,FOREGROUND_SERVICE_MEDIA_PLAYBACK,POST_NOTIFICATIONS,WAKE_LOCK
 android.wakelock = True
 android.allow_backup = True
 android.accept_sdk_license = True
