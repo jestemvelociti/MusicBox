@@ -7,6 +7,7 @@ pominiete (wymaga yt-dlp/ffmpeg — niedostepne na Androidzie).
 import json
 import os
 import queue
+import random
 import threading
 import time
 from datetime import date
@@ -35,7 +36,7 @@ from core.cover import extract_cover
 from core.library import Library
 from core.playlist import Playlist, Track
 from core.stats import Stats, format_listening
-from core.tags import display_name
+from core.tags import combine_name, display_artist, display_name, display_title
 
 from musicbox import android_io
 from musicbox.audio import (
@@ -55,7 +56,8 @@ class TrackRow(MDCard):
 
     def __init__(self, **kwargs):
         super(TrackRow, self).__init__(**kwargs)
-        self._name_label = None
+        self._title_label = None
+        self._artist_label = None
         self._cover_box = None
         self._down_pos = None
         self._build_row()
@@ -64,7 +66,7 @@ class TrackRow(MDCard):
     def _build_row(self):
         self.orientation = "horizontal"
         self.size_hint_y = None
-        self.height = dp(60)
+        self.height = dp(64)
         self.radius = [dp(10)]
         self.elevation = 1
         self.md_bg_color = (0.07, 0.1, 0.22, 1)
@@ -79,7 +81,8 @@ class TrackRow(MDCard):
         cover.add_widget(self._note_label("20sp"))
         self.add_widget(cover)
         self._cover_box = cover
-        self._name_label = MDLabel(
+        meta = MDBoxLayout(orientation="vertical", spacing=dp(0), size_hint_x=1)
+        self._title_label = MDLabel(
             text="",
             theme_text_color="Custom",
             text_color=(1, 1, 1, 1),
@@ -87,8 +90,24 @@ class TrackRow(MDCard):
             valign="middle",
             shorten=True,
             shorten_from="right",
+            size_hint_y=None,
+            height=dp(26),
         )
-        self.add_widget(self._name_label)
+        self._artist_label = MDLabel(
+            text="",
+            theme_text_color="Custom",
+            text_color=(0.55, 0.65, 0.85, 1),
+            halign="left",
+            valign="top",
+            shorten=True,
+            shorten_from="right",
+            font_size="12sp",
+            size_hint_y=None,
+            height=dp(20),
+        )
+        meta.add_widget(self._title_label)
+        meta.add_widget(self._artist_label)
+        self.add_widget(meta)
 
     @staticmethod
     def _note_label(size):
@@ -102,8 +121,10 @@ class TrackRow(MDCard):
         )
 
     def _on_row_path(self, *a):
-        if self._name_label is not None:
-            self._name_label.text = self.title
+        if self._title_label is not None:
+            self._title_label.text = self.title
+        if self._artist_label is not None:
+            self._artist_label.text = ""
         if self._cover_box is not None:
             self._cover_box.clear_widgets()
             self._cover_box.add_widget(self._note_label("20sp"))
@@ -113,10 +134,12 @@ class TrackRow(MDCard):
         app.enqueue_track(self.path, self.title, self)
         app.enqueue_cover(self, self.path)
 
-    def apply_name(self, name, path):
-        if self.path != path or self._name_label is None:
+    def apply_meta(self, title, artist, path):
+        if self.path != path or self._title_label is None:
             return
-        self._name_label.text = name
+        self._title_label.text = title or self.title
+        if self._artist_label is not None:
+            self._artist_label.text = artist or ""
 
     def apply_cover(self, cover, path):
         if self.path != path or self._cover_box is None:
@@ -161,7 +184,7 @@ KV = """
 <PlayerBar@BoxLayout>:
     orientation: "vertical"
     size_hint_y: None
-    height: dp(120)
+    height: dp(140)
     padding: dp(12), dp(4)
     spacing: dp(2)
     canvas.before:
@@ -183,6 +206,19 @@ KV = """
         text_size: self.width, None
         size_hint_y: None
         height: dp(26)
+    MDLabel:
+        id: artist_label
+        text: ""
+        theme_text_color: "Custom"
+        text_color: 0.6, 0.68, 0.83, 1
+        font_size: "12sp"
+        halign: "center"
+        valign: "top"
+        shorten: True
+        shorten_from: "center"
+        text_size: self.width, None
+        size_hint_y: None
+        height: dp(18)
     BoxLayout:
         orientation: "horizontal"
         spacing: dp(8)
@@ -358,7 +394,7 @@ KV = """
             viewclass: "TrackRow"
             RecycleBoxLayout:
                 orientation: "vertical"
-                default_size: None, dp(60)
+                default_size: None, dp(64)
                 default_size_hint: 1, None
                 size_hint_y: None
                 height: self.minimum_height
@@ -390,7 +426,7 @@ KV = """
             viewclass: "TrackRow"
             RecycleBoxLayout:
                 orientation: "vertical"
-                default_size: None, dp(60)
+                default_size: None, dp(64)
                 default_size_hint: 1, None
                 size_hint_y: None
                 height: self.minimum_height
@@ -428,6 +464,12 @@ KV = """
 
 BoxLayout:
     orientation: "vertical"
+    canvas.before:
+        Color:
+            rgba: C("#0a0f1e")
+        Rectangle:
+            pos: self.pos
+            size: self.size
     ScreenManager:
         id: manager
         HomeScreen:
@@ -490,16 +532,17 @@ class MusicBoxApp(MDApp):
         self._tick_debug = 0
         self._provider_logged = False
         self._last_state_path = None
+        self._play_order = []
         self._tags_cache = self._load_tags_cache()
         self._scrubbing = False
 
     def build(self):
         t0 = time.time()
-        Window.clearcolor = (0.039, 0.059, 0.118, 1)  # #0a0f1e — bez czarnej linii nad paskiem
         root = Builder.load_string(KV)
+        Window.clearcolor = (0.039, 0.059, 0.118, 1)  # po motywie KivyMD, zeby nie zostalo #121212
         self.root = root
         if android_io.is_android():
-            root.padding = (0, dp(android_io.status_bar_height()), 0, 0)
+            android_io.set_system_bar_colors()
         android_io.set_debug_logger(self._debug_log)
         self._wire_player_bar()
         self._start_workers()
@@ -589,7 +632,7 @@ class MusicBoxApp(MDApp):
             pass
 
     def _log_env(self):
-        self._debug_log("=== MusicBox start (0.4.3) ===")
+        self._debug_log("=== MusicBox start (0.5.1) ===")
         self._debug_log("api_level=%s android=%s" % (android_io.android_api_level(), android_io.is_android()))
         if android_io.is_android():
             self._debug_log("all_files_access=%s" % android_io.all_files_access())
@@ -785,7 +828,7 @@ class MusicBoxApp(MDApp):
 
     # ---------- okładki i karty ----------
     def _cover_cache_dir(self):
-        d = os.path.join(storage.get_data_dir(), "covers")
+        d = os.path.join(storage.get_data_dir(), "covers_v2")
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:
@@ -793,20 +836,37 @@ class MusicBoxApp(MDApp):
         return d
 
     def _cover_path(self, path):
-        """Zwraca sciezke okładki z cache (bez czytania pliku audio, gdy jest)."""
+        """Zwraca sciezke znormalizowanej okładki (kwadrat 512x512) z cache."""
         try:
             import hashlib
 
             key = hashlib.md5(str(path).encode("utf-8", "replace")).hexdigest()
-            out = os.path.join(self._cover_cache_dir(), key + ".img")
+            out = os.path.join(self._cover_cache_dir(), key + ".png")
             if os.path.isfile(out):
                 return out
             data = extract_cover(path)
             if not data:
                 return None
-            with open(out, "wb") as f:
-                f.write(data)
-            return out
+            try:
+                from io import BytesIO
+                from PIL import Image as PilImage
+
+                img = PilImage.open(BytesIO(data))
+                img = img.convert("RGB")
+                w, h = img.size
+                side = min(w, h)
+                left = (w - side) // 2
+                top = (h - side) // 2
+                img = img.crop((left, top, left + side, top + side))
+                img = img.resize((512, 512), PilImage.LANCZOS)
+                img.save(out, "PNG")
+                return out if os.path.isfile(out) else None
+            except Exception:
+                out_raw = os.path.join(self._cover_cache_dir(), key + ".img")
+                if not os.path.isfile(out_raw):
+                    with open(out_raw, "wb") as f:
+                        f.write(data)
+                return out_raw if os.path.isfile(out_raw) else None
         except Exception:
             return None
 
@@ -835,35 +895,55 @@ class MusicBoxApp(MDApp):
         self._cache_dirty = False
         self._save_tags_cache()
 
-    def _display(self, path, fallback):
-        """Tytul/wykonawca z trwalym cache (szybkie budowanie list)."""
+    def _display_meta_cached(self, path):
+        """(tytul, artysta) z cache albo None."""
         try:
             mtime = os.path.getmtime(path)
         except OSError:
             mtime = 0
         with self._tags_lock:
             cached = self._tags_cache.get(path)
-            if cached and isinstance(cached, list) and len(cached) == 2 and cached[0] == mtime:
-                return cached[1]
-        name = display_name(path, fallback)
+            if cached and isinstance(cached, list) and len(cached) == 3 and cached[0] == mtime:
+                return cached[1], cached[2]
+        return None
+
+    def _display_in_worker(self, path, fallback):
+        meta = self._display_meta_cached(path)
+        if meta is not None:
+            return meta
+        title = display_title(path, fallback)
+        artist = display_artist(path, "")
+        mtime = 0
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            pass
         with self._tags_lock:
             if len(self._tags_cache) > 1500:
                 self._tags_cache.clear()
-            self._tags_cache[path] = [mtime, name]
+            self._tags_cache[path] = [mtime, title, artist]
         self._cache_dirty = True
-        return name
+        return title, artist
 
-    def _display_cached(self, path):
-        """Tytul z cache albo None (gdy trzeba liczyc w watku tla)."""
+    def _display(self, path, fallback):
+        """Tytul/wykonawca z trwalym cache (szybkie budowanie list)."""
+        meta = self._display_meta_cached(path)
+        if meta is not None:
+            return combine_name(meta[0], meta[1], fallback)
+        name = display_name(path, fallback)
+        title = display_title(path, fallback)
+        artist = display_artist(path, "")
+        mtime = 0
         try:
             mtime = os.path.getmtime(path)
         except OSError:
-            mtime = 0
+            pass
         with self._tags_lock:
-            cached = self._tags_cache.get(path)
-            if cached and isinstance(cached, list) and len(cached) == 2 and cached[0] == mtime:
-                return cached[1]
-        return None
+            if len(self._tags_cache) > 1500:
+                self._tags_cache.clear()
+            self._tags_cache[path] = [mtime, title, artist]
+        self._cache_dirty = True
+        return name
 
     def _start_workers(self):
         for _ in range(4):
@@ -877,23 +957,6 @@ class MusicBoxApp(MDApp):
     def enqueue_cover(self, row, path):
         self._cover_queue.put(("row", row, path, None))
 
-    def _display_in_worker(self, path, fallback):
-        name = self._display_cached(path)
-        if name is not None:
-            return name
-        name = display_name(path, fallback)
-        mtime = 0
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            pass
-        with self._tags_lock:
-            if len(self._tags_cache) > 1500:
-                self._tags_cache.clear()
-            self._tags_cache[path] = [mtime, name]
-        self._cache_dirty = True
-        return name
-
     def _tag_worker(self):
         while True:
             item = self._tag_queue.get()
@@ -901,11 +964,11 @@ class MusicBoxApp(MDApp):
                 break
             path, fallback, row = item
             try:
-                name = self._display_in_worker(path, fallback)
+                title, artist = self._display_in_worker(path, fallback)
             except Exception:
-                name = fallback
+                title, artist = fallback, ""
             Clock.schedule_once(
-                lambda dt, r=row, n=name, p=path: r.apply_name(n, p), 0
+                lambda dt, r=row, t=title, a=artist, p=path: r.apply_meta(t, a, p), 0
             )
             self._tag_queue.task_done()
 
@@ -1127,7 +1190,18 @@ class MusicBoxApp(MDApp):
             pl.current_index = 0
 
     def _flash_status(self, text):
-        Clock.schedule_once(lambda dt: self._set_status(text), 0)
+        try:
+            from kivymd.uix.snackbar import Snackbar
+
+            Snackbar(
+                text=str(text),
+                snackbar_x="12dp",
+                snackbar_y="150dp",
+                size_hint_x=0.9,
+                duration=2.5,
+            ).open()
+        except Exception:
+            Clock.schedule_once(lambda dt: self._set_status(text), 0)
 
     def _set_status(self, text):
         self._screen_ids("home").empty_label.text = text
@@ -1206,8 +1280,15 @@ class MusicBoxApp(MDApp):
             self._clear_resume()
             return
         pl = self.controller.playlist
-        if pl is not None and 0 <= index < len(pl.tracks):
-            pl.current_index = index
+        if pl is not None:
+            natural = -1
+            if path:
+                for i, t in enumerate(pl.tracks):
+                    if t.path == path:
+                        natural = i
+                        break
+            if natural >= 0:
+                pl.current_index = natural
         if playing and path and path != self._last_state_path:
             self._last_state_path = path
             if pl is not None and pl.current() is not None:
@@ -1225,15 +1306,85 @@ class MusicBoxApp(MDApp):
     def _repeat_int(self):
         return {"all": 1, "one": 2, "off": 0}.get(self.controller.repeat_mode, 1)
 
+    def _rebuild_play_order(self, keep_current=True):
+        """Kolejnosc odtwarzania dla serwisu (naturalna albo potasowana)."""
+        pl = self.controller.playlist
+        if pl is None or not pl.tracks:
+            self._play_order = []
+            return
+        paths = [t.path for t in pl.tracks]
+        if not self.controller.shuffle_on:
+            self._play_order = paths
+            return
+        order = paths[:]
+        random.shuffle(order)
+        current = self.controller.current()
+        if keep_current and current is not None and current.path in order:
+            order.remove(current.path)
+            order = [current.path] + order
+        self._play_order = order
+
+    def _play_order_index(self, path):
+        if path in self._play_order:
+            return self._play_order.index(path)
+        return 0
+
+    def _send_playlist_meta(self, pl):
+        """Wysyla do serwisu tytuly (szybko) i okładki (rownolegle) w kolejnosc odtwarzania."""
+
+        def work():
+            try:
+                if pl is None or not pl.tracks:
+                    return
+                order = self._play_order or [t.path for t in pl.tracks]
+                by_path = {t.path: t for t in pl.tracks}
+                self._debug_log("meta: start %d" % len(order))
+                names = []
+                for p in order:
+                    t = by_path.get(p)
+                    names.append(self._display(p, t.title) if t else "")
+                self._debug_log("meta: tytuly gotowe")
+                self.audio.send_meta(names, [], has_covers=False)
+                covers = [""] * len(order)
+                lock = threading.Lock()
+                q = queue.Queue()
+
+                def compute():
+                    while True:
+                        i = q.get()
+                        if i is None:
+                            break
+                        c = None
+                        try:
+                            c = self._cover_path(order[i])
+                        except Exception:
+                            c = None
+                        with lock:
+                            covers[i] = c or ""
+                        q.task_done()
+
+                for _ in range(4):
+                    threading.Thread(target=compute, daemon=True).start()
+                for i in range(len(order)):
+                    q.put(i)
+                q.join()
+                self._debug_log("meta: okładki gotowe")
+                self.audio.send_meta(names, covers, has_covers=True)
+                self._debug_log("meta: wyslano %d utworow" % len(order))
+            except Exception as e:
+                self._debug_log("meta: blad " + repr(e))
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _play_track(self, track):
         if track is None:
             return
         if android_io.is_android():
             pl = self.controller.playlist
-            paths = [t.path for t in pl.tracks] if pl else []
-            index = self.controller.current_index if pl else -1
-            if index < 0 and track.path in paths:
-                index = paths.index(track.path)
+            if not self._play_order or track.path not in self._play_order:
+                self._rebuild_play_order(keep_current=False)
+            paths = self._play_order or ([t.path for t in pl.tracks] if pl else [])
+            index = self._play_order_index(track.path)
             name = self._display(track.path, track.title) or track.title or "MusicBox"
             cover = None
             try:
@@ -1241,6 +1392,7 @@ class MusicBoxApp(MDApp):
             except Exception:
                 cover = None
             self.audio.play(track.path, index, paths, self._repeat_int(), name, cover)
+            self._send_playlist_meta(pl)
             self._debug_log("audio: play %s" % track.path)
             self._update_now_label(track)
             self._set_play_icon()
@@ -1273,9 +1425,14 @@ class MusicBoxApp(MDApp):
         self._persist_settings()
 
     def _update_now_label(self, track):
-        self.root.ids.player_bar.ids.track_label.text = (
-            self._display(track.path, track.title) or track.title or "Brak utworu"
-        )
+        if track is None:
+            return
+        title = display_title(track.path, track.title) or track.title or "Brak utworu"
+        artist = display_artist(track.path, "")
+        pb = self.root.ids.player_bar.ids
+        pb.track_label.text = title
+        if "artist_label" in pb:
+            pb.artist_label.text = artist or ""
 
     def _set_play_icon(self):
         self.root.ids.player_bar.ids.play_btn.icon = "pause" if self.audio.is_playing else "play-circle"
@@ -1320,11 +1477,17 @@ class MusicBoxApp(MDApp):
             self._set_play_icon()
 
     def play_next(self):
+        if android_io.is_android():
+            self.audio.next_track()
+            return
         track = self.controller.play_next()
         if track:
             self._play_track(track)
 
     def play_prev(self):
+        if android_io.is_android():
+            self.audio.prev_track()
+            return
         track = self.controller.play_prev()
         if track:
             self._play_track(track)
@@ -1332,7 +1495,21 @@ class MusicBoxApp(MDApp):
     def toggle_shuffle(self):
         self.controller.set_shuffle(not self.controller.shuffle_on)
         self._refresh_shuffle_repeat_icons()
+        if android_io.is_android():
+            self._rebuild_play_order(keep_current=True)
+            self._send_play_order()
+            pl = self.controller.playlist
+            if pl is not None:
+                self._send_playlist_meta(pl)
         self._persist_settings()
+
+    def _send_play_order(self):
+        pl = self.controller.playlist
+        if not self._play_order:
+            return
+        by_path = {t.path: t for t in pl.tracks} if pl else {}
+        titles = [by_path[p].title if p in by_path else "" for p in self._play_order]
+        self.audio.send_order(self._play_order, titles, [], has_covers=False)
 
     def cycle_repeat(self):
         modes = [REPEAT_ALL, REPEAT_ONE, REPEAT_OFF]

@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.cover import extract_cover
-from core.tags import display_name
+from core.tags import display_artist, display_title
 
 
 class TrackList(QTableView):
@@ -21,7 +21,7 @@ class TrackList(QTableView):
         self.allow_remove = True
         self.setObjectName("trackTable")
         self.setModel(QStandardItemModel(self))
-        self.model().setHorizontalHeaderLabels(["#", "Okładka", "Tytuł"])
+        self.model().setHorizontalHeaderLabels(["#", "Okładka", "Tytuł", "Wykonawca"])
 
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -39,6 +39,7 @@ class TrackList(QTableView):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(1, 40)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
 
         self.doubleClicked.connect(self._on_double_clicked)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -57,8 +58,9 @@ class TrackList(QTableView):
             pixmap = self._cover_pixmap(track.path)
             if pixmap is not None:
                 cover.setIcon(QIcon(pixmap))
-            title = QStandardItem(display_name(track.path, track.title))
-            model.appendRow([num, cover, title])
+            title = QStandardItem(display_title(track.path, track.title))
+            artist = QStandardItem(display_artist(track.path, ""))
+            model.appendRow([num, cover, title, artist])
 
     @staticmethod
     def _cover_pixmap(path):
@@ -75,8 +77,13 @@ class TrackList(QTableView):
         query = text.strip().lower()
         model = self.model()
         for row in range(model.rowCount()):
-            item = model.item(row, 2)
-            match = not query or (item is not None and query in item.text().lower())
+            item_t = model.item(row, 2)
+            item_a = model.item(row, 3)
+            match = (
+                not query
+                or (item_t is not None and query in item_t.text().lower())
+                or (item_a is not None and query in item_a.text().lower())
+            )
             self.setRowHidden(row, not match)
 
     def highlight_current(self, index):

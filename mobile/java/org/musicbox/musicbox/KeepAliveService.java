@@ -35,6 +35,8 @@ public class KeepAliveService extends Service {
     public static final String CMD_STOP = "org.musicbox.musicbox.cmd.STOP";
     public static final String CMD_SEEK = "org.musicbox.musicbox.cmd.SEEK";
     public static final String CMD_REPEAT = "org.musicbox.musicbox.cmd.REPEAT";
+    public static final String CMD_META = "org.musicbox.musicbox.cmd.META";
+    public static final String CMD_ORDER = "org.musicbox.musicbox.cmd.ORDER";
 
     public static final String ACTION_STATE = "org.musicbox.musicbox.state.CHANGED";
     public static final String ACTION_POSITION = "org.musicbox.musicbox.state.POSITION";
@@ -50,6 +52,9 @@ public class KeepAliveService extends Service {
     private static final String EXTRA_POSITION_MS = "position_ms";
     private static final String EXTRA_DURATION_MS = "duration_ms";
     private static final String EXTRA_RESUME_MS = "resume_ms";
+    private static final String EXTRA_TITLES = "titles";
+    private static final String EXTRA_COVERS = "covers";
+    private static final String EXTRA_HAS_COVERS = "has_covers";
 
     private static final int REPEAT_OFF = 0;
     private static final int REPEAT_ALL = 1;
@@ -60,6 +65,8 @@ public class KeepAliveService extends Service {
     private MediaPlayer mediaPlayer;
     private Handler handler = new Handler();
     private String[] paths;
+    private String[] metaTitles;
+    private String[] metaCovers;
     private int index = -1;
     private boolean playing = false;
     private int repeatMode = REPEAT_ALL;
@@ -129,6 +136,50 @@ public class KeepAliveService extends Service {
             }
         } else if (CMD_REPEAT.equals(action)) {
             repeatMode = parseInt(intent.getStringExtra(EXTRA_REPEAT), repeatMode);
+        } else if (CMD_META.equals(action)) {
+            metaTitles = splitPaths(intent.getStringExtra(EXTRA_TITLES));
+            if ("1".equals(intent.getStringExtra(EXTRA_HAS_COVERS))) {
+                metaCovers = splitPaths(intent.getStringExtra(EXTRA_COVERS));
+            }
+            if (index >= 0) {
+                updateMetaForIndex(index);
+                updateNotification();
+            }
+        } else if (CMD_ORDER.equals(action)) {
+            String[] newPaths = splitPaths(intent.getStringExtra(EXTRA_PATHS));
+            if (newPaths.length == 0) {
+                return;
+            }
+            String current = (paths != null && index >= 0 && index < paths.length)
+                    ? paths[index] : "";
+            paths = newPaths;
+            metaTitles = splitPaths(intent.getStringExtra(EXTRA_TITLES));
+            if ("1".equals(intent.getStringExtra(EXTRA_HAS_COVERS))) {
+                metaCovers = splitPaths(intent.getStringExtra(EXTRA_COVERS));
+            }
+            index = -1;
+            if (!current.isEmpty()) {
+                for (int i = 0; i < paths.length; i++) {
+                    if (current.equals(paths[i])) {
+                        index = i;
+                        break;
+                    }
+                }
+            }
+            updateMetaForIndex(index);
+            sendState(false);
+            updateNotification();
+        }
+    }
+
+    private void updateMetaForIndex(int idx) {
+        if (metaTitles != null && idx >= 0 && idx < metaTitles.length
+                && metaTitles[idx] != null && !metaTitles[idx].isEmpty()) {
+            currentTitle = metaTitles[idx];
+        }
+        if (metaCovers != null && idx >= 0 && idx < metaCovers.length
+                && metaCovers[idx] != null && !metaCovers[idx].isEmpty()) {
+            currentCover = metaCovers[idx];
         }
     }
 
@@ -156,6 +207,7 @@ public class KeepAliveService extends Service {
             return;
         }
         index = newIndex;
+        updateMetaForIndex(index);
         try {
             if (mediaPlayer != null) {
                 try {

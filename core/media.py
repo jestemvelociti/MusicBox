@@ -15,13 +15,11 @@ class PlayerEngine(QObject):
         self.media = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.media.setAudioOutput(self.audio)
-        self._pending_count_source = None
 
         self.media.positionChanged.connect(self._forward_position)
         self.media.durationChanged.connect(self._forward_duration)
         self.media.mediaStatusChanged.connect(self._on_status)
         self.media.errorOccurred.connect(self._on_error)
-        self.media.playbackStateChanged.connect(self._on_playback_state)
 
     def _forward_position(self, value):
         self.positionChanged.emit(int(value))
@@ -32,16 +30,6 @@ class PlayerEngine(QObject):
     def _on_status(self, status):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.playbackEnded.emit()
-
-    def _on_playback_state(self, state):
-        if state != QMediaPlayer.PlaybackState.PlayingState:
-            return
-        if self._pending_count_source is None:
-            return
-        source = self.media.source().toLocalFile()
-        if source and source == self._pending_count_source:
-            self._pending_count_source = None
-            self.trackStarted.emit(source)
 
     def _on_error(self, error, message):
         self.errorOccurred.emit(message)
@@ -62,8 +50,8 @@ class PlayerEngine(QObject):
     def set_track(self, path):
         self.media.stop()
         self.media.setSource(QUrl.fromLocalFile(path))
-        self._pending_count_source = path
         self.trackChanged.emit(path)
+        self.trackStarted.emit(path)
         self.play()
 
     @property

@@ -22,6 +22,8 @@ CMD_PREV = "org.musicbox.musicbox.cmd.PREV"
 CMD_STOP = "org.musicbox.musicbox.cmd.STOP"
 CMD_SEEK = "org.musicbox.musicbox.cmd.SEEK"
 CMD_REPEAT = "org.musicbox.musicbox.cmd.REPEAT"
+CMD_META = "org.musicbox.musicbox.cmd.META"
+CMD_ORDER = "org.musicbox.musicbox.cmd.ORDER"
 
 STATE_CHANGED = "org.musicbox.musicbox.state.CHANGED"
 STATE_POSITION = "org.musicbox.musicbox.state.POSITION"
@@ -74,6 +76,29 @@ class _ServiceAudio:
 
     def play_file(self, path):
         return False
+
+    def next_track(self):
+        android_io.send_playback_command(CMD_NEXT)
+
+    def prev_track(self):
+        android_io.send_playback_command(CMD_PREV)
+
+    def send_order(self, paths, titles, covers, has_covers=True):
+        android_io.send_playback_command(
+            CMD_ORDER,
+            paths="\n".join(paths),
+            titles="\n".join(titles),
+            covers="\n".join(covers),
+            has_covers="1" if has_covers else "0",
+        )
+
+    def send_meta(self, titles, covers, has_covers=True):
+        android_io.send_playback_command(
+            CMD_META,
+            titles="\n".join(titles),
+            covers="\n".join(covers),
+            has_covers="1" if has_covers else "0",
+        )
 
     def pause(self):
         self._playing = False
@@ -323,6 +348,22 @@ class AudioPlayer:
     def set_repeat(self, repeat):
         if hasattr(self._backend, "set_repeat"):
             self._backend.set_repeat(repeat)
+
+    def send_meta(self, titles, covers, has_covers=True):
+        if hasattr(self._backend, "send_meta"):
+            self._backend.send_meta(titles, covers, has_covers)
+
+    def send_order(self, paths, titles, covers, has_covers=True):
+        if hasattr(self._backend, "send_order"):
+            self._backend.send_order(paths, titles, covers, has_covers)
+
+    def next_track(self):
+        if hasattr(self._backend, "next_track"):
+            self._backend.next_track()
+
+    def prev_track(self):
+        if hasattr(self._backend, "prev_track"):
+            self._backend.prev_track()
 
     def apply_state(self, path, index, playing, ended, title, cover):
         if hasattr(self._backend, "apply_state"):

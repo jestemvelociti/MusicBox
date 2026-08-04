@@ -55,6 +55,26 @@ def status_bar_height():
         return 0
 
 
+def set_system_bar_colors(color="#0a0f1e"):
+    """Ustawia kolor status/nav bara na kolor apki + jasne ikony (spójny wyglad)."""
+    if not _ANDROID:
+        return False
+    try:
+        from jnius import autoclass
+
+        Color = autoclass("android.graphics.Color")
+        View = autoclass("android.view.View")
+        activity = _activity()
+        win = activity.getWindow()
+        c = Color.parseColor(color)
+        win.setStatusBarColor(c)
+        win.setNavigationBarColor(c)
+        win.getDecorView().setSystemUiVisibility(0)
+        return True
+    except Exception:
+        return False
+
+
 def _activity():
     from jnius import autoclass
 
