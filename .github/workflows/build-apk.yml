@@ -1,0 +1,39 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - 'core/**'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    container:
+      image: kivy/buildozer:latest
+    env:
+      BUILDOZER_WARN_ON_ROOT: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare mobile source (shared core + assets)
+        run: |
+          set -e
+          cp -r core mobile/core
+          mkdir -p mobile/assets
+          cp -f assets/icon.png mobile/assets/icon.png
+
+      - name: Build debug APK
+        run: |
+          cd mobile
+          buildozer -v android debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MusicBox-apk
+          path: mobile/bin/*.apk
+          if-no-files-found: error

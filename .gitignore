@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Wirtualne srodowiska
+.venv/
+venv/
+env/
+
+# Build (PyInstaller)
+build/
+dist/
+*.spec.bak
+
+# Android / buildozer
+mobile/.buildozer/
+mobile/bin/*.apk
+
+# Narzedzia / artefakty pobierania
+bin/yt-dlp*
+bin/ffmpeg*
+bin/deno*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# System
+Thumbs.db
+.DS_Store
+
+# Skrytki diagnostyczne / notatki asystenta
+do_analizy/
