@@ -7,7 +7,7 @@ source.dir = .
 source.include_exts = py,kv,atl
 source.include_patterns = assets/*.png
 
-version = 0.3.7
+version = 0.4.3
 
 requirements = hostpython3==3.11.9,python3==3.11.9,kivy==2.3.0,kivymd==1.2.0,pyjnius,plyer,mutagen
 

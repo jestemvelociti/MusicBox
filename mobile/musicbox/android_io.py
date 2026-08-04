@@ -133,7 +133,7 @@ def uri_to_path(uri):
                         if cursor.moveToFirst():
                             idx = cursor.getColumnIndex("_data")
                             if idx >= 0:
-                                return cursor.getString(idx) or uri
+                                return cursor.getString(idx) or str(uri)
                     finally:
                         cursor.close()
             except Exception:
@@ -151,12 +151,12 @@ def uri_to_path(uri):
                 if cursor.moveToFirst():
                     idx = cursor.getColumnIndex(MediaStore.DATA)
                     if idx >= 0:
-                        return cursor.getString(idx) or uri
+                        return cursor.getString(idx) or str(uri)
             finally:
                 cursor.close()
     except Exception:
         pass
-    return uri
+    return str(uri)
 
 
 def _read_stream_all(stream):
@@ -281,8 +281,14 @@ def _uri_display_name(uri):
 
 
 def musicbox_dir():
-    """Zwraca (i tworzy) folder MusicBox/ na pamieci wspoldzielonej."""
+    """Zwraca (i tworzy) folder MusicBox/ na pamieci wspoldzielonej.
+
+    Bez 'Wszystkich plikow' (API 30+) zwraca None — aplikacja uzywa wtedy
+    prywatnego katalogu. Widoczny folder to opcja przy nadanej zgodzie.
+    """
     if not _ANDROID:
+        return None
+    if android_api_level() >= 30 and not all_files_access():
         return None
     try:
         from jnius import autoclass
@@ -334,7 +340,7 @@ def all_files_access():
 
 
 def open_all_files_settings():
-    """Otwiera systemowy ekran 'Wszystkie pliki' dla tej aplikacji."""
+    """Otwiera systemowy ekran 'Wszystkie pliki' dla tej aplikacji (z fallbackami)."""
     if not _ANDROID:
         return False
     try:
@@ -344,12 +350,29 @@ def open_all_files_settings():
         Uri = autoclass("android.net.Uri")
         Settings = autoclass("android.provider.Settings")
         activity = _activity()
-        uri = Uri.fromParts("package", activity.getPackageName(), None)
-        intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri)
-        activity.startActivity(intent)
-        return True
+        pkg = activity.getPackageName()
+        uri = Uri.fromParts("package", pkg, None)
+
+        def start(intent):
+            intent.addFlags(0x10000000)  # FLAG_ACTIVITY_NEW_TASK
+            activity.startActivity(intent)
+            return True
+
+        try:
+            return start(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
+        except Exception:
+            pass
+        try:
+            return start(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        except Exception:
+            pass
+        try:
+            return start(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri))
+        except Exception:
+            pass
     except Exception:
-        return False
+        pass
+    return False
 
 
 _PLAYBACK_SERVICE = "org.musicbox.musicbox.KeepAliveService"
@@ -363,13 +386,14 @@ def start_playback_service(title=None, cover=None, playing=True):
         from jnius import autoclass
 
         Intent = autoclass("android.content.Intent")
+        String = autoclass("java.lang.String")
         activity = _activity()
         intent = Intent()
         intent.setClassName(activity.getPackageName(), _PLAYBACK_SERVICE)
         if title:
-            intent.putExtra("title", title)
+            intent.putExtra("title", String(str(title)))
         if cover:
-            intent.putExtra("cover", cover)
+            intent.putExtra("cover", String(str(cover)))
         intent.putExtra("playing", bool(playing))
         if android_api_level() >= 26:
             activity.startForegroundService(intent)
@@ -383,6 +407,32 @@ def start_playback_service(title=None, cover=None, playing=True):
 def set_playback_paused(paused):
     """Zmienia stan powiadomienia (pauza/wznowienie) bez zatrzymywania serwisu."""
     return start_playback_service(playing=not paused)
+
+
+def send_playback_command(action, **extras):
+    """Wysyla komende do KeepAliveService (Java MediaPlayer)."""
+    if not _ANDROID:
+        return False
+    try:
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        String = autoclass("java.lang.String")
+        activity = _activity()
+        intent = Intent()
+        intent.setClassName(activity.getPackageName(), _PLAYBACK_SERVICE)
+        intent.setAction(action)
+        for key, value in extras.items():
+            if value is None:
+                continue
+            intent.putExtra(key, String(str(value)))
+        if android_api_level() >= 26:
+            activity.startForegroundService(intent)
+        else:
+            activity.startService(intent)
+        return True
+    except Exception:
+        return False
 
 
 def stop_playback_service():
@@ -402,6 +452,69 @@ def stop_playback_service():
         return False
 
 
+_media_receiver_obj = None
+_media_receiver_ctx = None
+_media_callback_obj = None
+
+
+def register_media_receiver(callback, actions):
+    """Rejestruje BroadcastReceiver na KONTEKSCIE APLIKACJI.
+
+    Przyciski powiadomienia docieraja do Pythona nawet gdy Activity jest
+    zniszczone w tle, dopoki proces zyje (trzyma go FGS).
+    """
+    global _media_receiver_obj, _media_receiver_ctx, _media_callback_obj
+    unregister_media_receiver()
+    if not _ANDROID or not actions:
+        return False
+    try:
+        from jnius import autoclass, java_method, PythonJavaClass
+
+        class _Callback(PythonJavaClass):
+            __javainterfaces__ = ["org/kivy/android/GenericBroadcastReceiverCallback"]
+            __javacontext__ = "app"
+
+            def __init__(self, fn):
+                super(_Callback, self).__init__()
+                self._fn = fn
+
+            @java_method("(Landroid/content/Context;Landroid/content/Intent;)V")
+            def onReceive(self, context, intent):
+                try:
+                    if self._fn is not None:
+                        self._fn(context, intent)
+                except Exception:
+                    pass
+
+        cb = _Callback(callback)
+        GenericBroadcastReceiver = autoclass("org.kivy.android.GenericBroadcastReceiver")
+        IntentFilter = autoclass("android.content.IntentFilter")
+        context = _activity().getApplicationContext()
+        receiver = GenericBroadcastReceiver(cb)
+        intent_filter = IntentFilter()
+        for a in actions:
+            intent_filter.addAction(a)
+        context.registerReceiver(receiver, intent_filter)
+        _media_receiver_obj = receiver
+        _media_receiver_ctx = context
+        _media_callback_obj = cb
+        return True
+    except Exception:
+        return False
+
+
+def unregister_media_receiver():
+    global _media_receiver_obj, _media_receiver_ctx, _media_callback_obj
+    if _media_receiver_obj is not None and _media_receiver_ctx is not None:
+        try:
+            _media_receiver_ctx.unregisterReceiver(_media_receiver_obj)
+        except Exception:
+            pass
+    _media_receiver_obj = None
+    _media_receiver_ctx = None
+    _media_callback_obj = None
+
+
 def resolve_playlist_path(uri):
     """Zwraca path, ktora nadaje sie do Playlist.load_m3u.
 
@@ -414,7 +527,7 @@ def resolve_playlist_path(uri):
     if _ANDROID and str(uri).startswith("content://"):
         real = uri_to_path(uri)
         _dbg("resolve: real=" + str(real))
-        if real and os.path.isfile(real):
+        if isinstance(real, str) and real and os.path.isfile(real):
             if all_files_access():
                 data = read_bytes(uri)
                 _dbg("resolve: real-path read_bytes len=" + str(len(data)))
@@ -530,6 +643,32 @@ def m3u_basenames(raw):
     return names
 
 
+def _search_media_filesystem(names):
+    """Szuka plikow audio po nazwie pliku w typowych folderach.
+
+    Fallback gdy MediaStore nic nie zwroci (np. slaby index). Zwraca liste
+    sciezek w kolejnosci names (None gdy brak).
+    """
+    wanted = {n for n in names if n}
+    if not wanted:
+        return [None] * len(names)
+    roots = ["/storage/emulated/0/Download", "/storage/emulated/0/Music",
+             "/storage/emulated/0/MusicBox", "/storage/emulated/0/muza"]
+    by_name = {}
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                for fn in filenames:
+                    if fn.lower().endswith((".mp3", ".flac", ".m4a", ".wav", ".ogg")):
+                        if fn in wanted:
+                            by_name[fn] = os.path.join(dirpath, fn)
+        except OSError:
+            continue
+    return [by_name.get(n) for n in names]
+
+
 def find_media_paths(names):
     """Szuka plikow audio w MediaStore po nazwie (DISPLAY_NAME).
 
@@ -538,33 +677,40 @@ def find_media_paths(names):
     """
     if not _ANDROID or not names:
         return []
+    found = []
     try:
         from jnius import autoclass
 
         resolver = _activity().getContentResolver()
         MediaStoreAudio = autoclass("android.provider.MediaStore$Audio$Media")
+        by_name = {}
+        cursor = resolver.query(
+            MediaStoreAudio.EXTERNAL_CONTENT_URI,
+            ["_display_name", "_data"],
+            None,
+            None,
+            None,
+        )
+        if cursor is not None:
+            try:
+                while cursor.moveToNext():
+                    di = cursor.getColumnIndex("_display_name")
+                    pi = cursor.getColumnIndex("_data")
+                    if di >= 0 and pi >= 0:
+                        dname = cursor.getString(di)
+                        path = cursor.getString(pi)
+                        if dname and path and dname not in by_name:
+                            by_name[dname] = path
+            finally:
+                cursor.close()
+        _dbg("find_media_paths: rows=%d names=%d" % (len(by_name), len(names)))
+        found = [by_name.get(n) for n in names]
+    except Exception as e:
+        _dbg("find_media_paths: wyjatek " + repr(e))
         found = []
-        for name in names:
-            cursor = resolver.query(
-                MediaStoreAudio.EXTERNAL_CONTENT_URI,
-                ["_data"],
-                "DISPLAY_NAME=?",
-                [name],
-                None,
-            )
-            path = None
-            if cursor is not None:
-                try:
-                    if cursor.moveToFirst():
-                        idx = cursor.getColumnIndex("_data")
-                        if idx >= 0:
-                            path = cursor.getString(idx) or None
-                finally:
-                    cursor.close()
-            found.append(path)
-        return found
-    except Exception:
-        return []
+    if not any(found):
+        found = _search_media_filesystem(names)
+    return found
 
 
 def pick_m3u(on_selected):
@@ -583,6 +729,11 @@ def pick_m3u(on_selected):
 
         request_code = randint(123456, 654321)
 
+        from kivy.clock import Clock
+
+        def emit(*args):
+            Clock.schedule_once(lambda dt: on_selected(*args), 0)
+
         def on_result(request_code_, result_code, data):
             _dbg(
                 "on_activity_result: fired, code=%s result=%s data=%s"
@@ -598,23 +749,23 @@ def pick_m3u(on_selected):
             try:
                 if result_code != -1 or data is None:  # RESULT_OK == -1
                     _dbg("on_activity_result: anulowano (result=%s)" % result_code)
-                    on_selected([])
+                    emit([])
                     return
                 uri = data.getData()
                 uri_str = uri.toString() if uri is not None else None
                 _dbg("on_activity_result: uri=" + str(uri_str))
                 if not uri_str:
-                    on_selected([], "Brak wybranego pliku")
+                    emit([], "Brak wybranego pliku")
                     return
                 path = resolve_playlist_path(uri_str)
                 _dbg("on_activity_result: path=" + str(path))
                 if path:
-                    on_selected([path])
+                    emit([path])
                 else:
-                    on_selected([], "Nie udało się odczytać wybranego pliku")
+                    emit([], "Nie udało się odczytać wybranego pliku")
             except Exception as e:
                 _dbg("on_activity_result: wyjatek " + repr(e))
-                on_selected([], "Nie udało się odczytać wybranego pliku")
+                emit([], "Nie udało się odczytać wybranego pliku")
 
         activity.bind(on_activity_result=on_result)
 

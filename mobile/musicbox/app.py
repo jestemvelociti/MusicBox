@@ -38,7 +38,11 @@ from core.stats import Stats, format_listening
 from core.tags import display_name
 
 from musicbox import android_io
-from musicbox.audio import AudioPlayer
+from musicbox.audio import (
+    AudioPlayer,
+    STATE_CHANGED,
+    STATE_POSITION,
+)
 from musicbox.controller import PlaybackController, REPEAT_ALL, REPEAT_OFF, REPEAT_ONE
 
 
@@ -308,6 +312,14 @@ KV = """
             height: dp(26)
             shorten: True
             shorten_from: "center"
+        MDRectangleFlatButton:
+            id: grant_btn
+            text: "Nadaj dostęp do plików"
+            size_hint_y: None
+            height: 0
+            opacity: 0
+            disabled: True
+            on_release: app.grant_all_files_access()
         ScrollView:
             GridLayout:
                 id: playlist_list
@@ -477,6 +489,7 @@ class MusicBoxApp(MDApp):
         self._cover_queue = queue.Queue()
         self._tick_debug = 0
         self._provider_logged = False
+        self._last_state_path = None
         self._tags_cache = self._load_tags_cache()
         self._scrubbing = False
 
@@ -495,7 +508,7 @@ class MusicBoxApp(MDApp):
         self._restore_prefs()
         self._log_env()
         if android_io.is_android():
-            android_io.request_storage_permissions()
+            Clock.schedule_once(lambda dt: self._request_permissions(), 1.0)
             if android_io.all_files_access():
                 android_io.musicbox_dir()
             else:
@@ -520,20 +533,40 @@ class MusicBoxApp(MDApp):
 
     def on_stop(self):
         try:
-            if getattr(self, "_media_receiver", None) is not None:
-                self._media_receiver.stop()
+            android_io.unregister_media_receiver()
         except Exception:
             pass
 
     def _schedule_access_prompt(self):
         Clock.schedule_once(lambda dt: self._prompt_all_files_access(), 1.5)
 
+    def _request_permissions(self):
+        try:
+            android_io.request_storage_permissions(
+                lambda permissions, grants: self._debug_log(
+                    "perms: %s -> %s" % (permissions, grants)
+                )
+            )
+        except Exception:
+            pass
+
     def _prompt_all_files_access(self):
         if android_io.is_android() and not android_io.all_files_access():
             self._flash_status(
-                "MusicBox wymaga dostępu do 'Wszystkich plików'. Włącz go w ustawieniach."
+                "MusicBox działa bez 'Wszystkich plików'. Nadaj dostęp, by mieć widoczny folder MusicBox."
             )
             android_io.open_all_files_settings()
+
+    def grant_all_files_access(self):
+        if android_io.is_android():
+            if android_io.open_all_files_settings():
+                self._flash_status(
+                    "Nadaj MusicBox dostęp do 'Wszystkich plików' i wróć (opcjonalne)."
+                )
+            else:
+                self._flash_status(
+                    "Otwórz ustawienia i nadaj MusicBox 'Wszystkie pliki' (opcjonalne)."
+                )
 
     def _debug_log(self, msg):
         """Zapisuje zdarzenie do widocznego logu (zawsze aktywne)."""
@@ -556,7 +589,7 @@ class MusicBoxApp(MDApp):
             pass
 
     def _log_env(self):
-        self._debug_log("=== MusicBox start (0.3.7) ===")
+        self._debug_log("=== MusicBox start (0.4.3) ===")
         self._debug_log("api_level=%s android=%s" % (android_io.android_api_level(), android_io.is_android()))
         if android_io.is_android():
             self._debug_log("all_files_access=%s" % android_io.all_files_access())
@@ -708,14 +741,21 @@ class MusicBoxApp(MDApp):
         for i, p in enumerate(self.library.playlists):
             lst.add_widget(self._playlist_tile(i, p))
         ids.empty_label.opacity = 0 if self.library.playlists else 1
+        self._debug_log("refresh_home: %d playlist" % len(self.library.playlists))
+        grant = android_io.is_android() and not android_io.all_files_access()
+        ids.grant_btn.height = dp(40) if grant else 0
+        ids.grant_btn.opacity = 1 if grant else 0
+        ids.grant_btn.disabled = not grant
         if android_io.is_android():
             mdir = android_io.musicbox_dir()
             if mdir:
                 ids.folder_label.text = f"Folder: {mdir}"
-            else:
+            elif not android_io.storage_permission_granted():
                 ids.folder_label.text = (
-                    "MusicBox wymaga dostępu do 'Wszystkich plików' — nadaj go w ustawieniach"
+                    "Brak dostępu do multimediów — nadaj uprawnienie w ustawieniach"
                 )
+            else:
+                ids.folder_label.text = "Dostęp do multimediów: ✓"
         else:
             ids.folder_label.text = ""
 
@@ -1000,20 +1040,6 @@ class MusicBoxApp(MDApp):
                 self._debug_log(
                     "import: klik Importuj, all_files=%s" % android_io.all_files_access()
                 )
-                if (
-                    android_io.android_api_level() >= 30
-                    and not android_io.all_files_access()
-                ):
-                    self._debug_log("import: wymagany dostep do wszystkich plikow")
-                    if android_io.open_all_files_settings():
-                        self._flash_status(
-                            "MusicBox wymaga dostępu do 'Wszystkich plików'. Włącz go i wróć."
-                        )
-                    else:
-                        self._flash_status(
-                            "Włącz MusicBox uprawnienie 'Wszystkie pliki' w ustawieniach Androida."
-                        )
-                    return
                 android_io.musicbox_dir()
                 self._debug_log("import: otwieram picker")
                 if not android_io.pick_m3u(self._on_import_selected):
@@ -1120,32 +1146,40 @@ class MusicBoxApp(MDApp):
         slider.bind(on_touch_up=self._on_slider_touch_up)
 
     def _setup_media_receiver(self):
-        """Odbiera akcje z przyciskow powiadomienia (MediaStyle) przez broadcast."""
+        """Odbiera broadcasty stanu/pozycji od KeepAliveService (app-context)."""
         if not android_io.is_android():
             return
         try:
-            from android import broadcast
 
             def _on_bcast(context, intent):
                 action = intent.getAction()
-                Clock.schedule_once(lambda dt, a=action: self._on_media_action(a), 0)
+                if action == STATE_CHANGED:
+                    state = {
+                        "path": intent.getStringExtra("path"),
+                        "index": intent.getIntExtra("index", -1),
+                        "playing": intent.getBooleanExtra("playing", False),
+                        "ended": intent.getBooleanExtra("ended", False),
+                        "title": intent.getStringExtra("title"),
+                        "cover": intent.getStringExtra("cover"),
+                    }
+                    Clock.schedule_once(lambda dt: self._on_media_state(state), 0)
+                elif action == STATE_POSITION:
+                    pos = intent.getIntExtra("position_ms", 0)
+                    dur = intent.getIntExtra("duration_ms", 0)
+                    Clock.schedule_once(
+                        lambda dt, p=pos, d=dur: self._on_media_position(p, d), 0
+                    )
 
-            self._media_receiver = broadcast.BroadcastReceiver(
+            ok = android_io.register_media_receiver(
                 _on_bcast,
-                actions=[
-                    "org.musicbox.musicbox.action.PLAY_PAUSE",
-                    "org.musicbox.musicbox.action.NEXT",
-                    "org.musicbox.musicbox.action.PREV",
-                    "org.musicbox.musicbox.action.STOP",
-                ],
+                [STATE_CHANGED, STATE_POSITION],
             )
-            self._media_receiver.start()
-            self._debug_log("media_receiver: ok")
+            self._debug_log("media_receiver: %s" % ("ok" if ok else "brak"))
         except Exception as e:
-            self._media_receiver = None
             self._debug_log("media_receiver: blad " + repr(e))
 
     def _on_media_action(self, action):
+        self._debug_log("media_action: " + str(action))
         try:
             if action == "org.musicbox.musicbox.action.PLAY_PAUSE":
                 self.toggle_play()
@@ -1161,8 +1195,55 @@ class MusicBoxApp(MDApp):
         except Exception:
             pass
 
+    def _on_media_state(self, state):
+        path = state.get("path") or ""
+        index = int(state.get("index", -1))
+        playing = bool(state.get("playing", False))
+        ended = bool(state.get("ended", False))
+        self.audio.apply_state(path, index, playing, ended, "", "")
+        if ended:
+            self._set_play_icon()
+            self._clear_resume()
+            return
+        pl = self.controller.playlist
+        if pl is not None and 0 <= index < len(pl.tracks):
+            pl.current_index = index
+        if playing and path and path != self._last_state_path:
+            self._last_state_path = path
+            if pl is not None and pl.current() is not None:
+                self._update_now_label(pl.current())
+                if self.stats.has_profile:
+                    self.stats.increment_play(pl.current().path)
+                    self.stats.save()
+                    self._sync_profile_out()
+                self._persist_settings()
+        self._set_play_icon()
+
+    def _on_media_position(self, position_ms, duration_ms):
+        self.audio.apply_position(position_ms, duration_ms)
+
+    def _repeat_int(self):
+        return {"all": 1, "one": 2, "off": 0}.get(self.controller.repeat_mode, 1)
+
     def _play_track(self, track):
         if track is None:
+            return
+        if android_io.is_android():
+            pl = self.controller.playlist
+            paths = [t.path for t in pl.tracks] if pl else []
+            index = self.controller.current_index if pl else -1
+            if index < 0 and track.path in paths:
+                index = paths.index(track.path)
+            name = self._display(track.path, track.title) or track.title or "MusicBox"
+            cover = None
+            try:
+                cover = self._cover_path(track.path)
+            except Exception:
+                cover = None
+            self.audio.play(track.path, index, paths, self._repeat_int(), name, cover)
+            self._debug_log("audio: play %s" % track.path)
+            self._update_now_label(track)
+            self._set_play_icon()
             return
         t0 = time.time()
         ok = self.audio.play_file(track.path)
@@ -1202,6 +1283,21 @@ class MusicBoxApp(MDApp):
     def toggle_play(self):
         pl = self.controller.playlist
         if pl is None:
+            return
+        if android_io.is_android():
+            if pl.current() is None and pl.tracks:
+                self._play_track(pl.tracks[0])
+                return
+            if self.audio.is_playing:
+                self.audio.pause()
+            else:
+                if self.audio.current_source:
+                    self.audio.resume()
+                else:
+                    index = pl.current_index if pl.current_index >= 0 else 0
+                    if 0 <= index < len(pl.tracks):
+                        self._play_track(pl.tracks[index])
+            self._set_play_icon()
             return
         if pl.current() is None and pl.tracks:
             self._play_track(self.controller.play_at(0))
@@ -1245,6 +1341,8 @@ class MusicBoxApp(MDApp):
             current = REPEAT_ALL
         self.controller.set_repeat(modes[(modes.index(current) + 1) % 3])
         self._refresh_shuffle_repeat_icons()
+        if android_io.is_android():
+            self.audio.set_repeat(self._repeat_int())
         self._persist_settings()
 
     def _refresh_shuffle_repeat_icons(self):
@@ -1259,6 +1357,8 @@ class MusicBoxApp(MDApp):
         )
 
     def _on_ended(self):
+        if android_io.is_android():
+            return
         action, track = self.controller.on_playback_ended()
         if action == "replay":
             self.audio.replay()
@@ -1693,15 +1793,28 @@ class MusicBoxApp(MDApp):
                 if index >= 0:
                     playlist.current_index = index
                     self.controller.set_playlist(playlist)
-                    self._suppress = True
-                    try:
-                        self.audio.play_file(path)
-                        self.audio.pause()
+                    if android_io.is_android():
                         pos_ms = max(0, int(resume.get("position_ms", 0)))
-                        pos_sec = pos_ms / 1000.0
-                        self.audio.set_resume_position(pos_sec)
-                        Clock.schedule_once(lambda dt: self.audio.seek(pos_sec), 0.3)
-                        self._update_now_label(playlist.current())
-                    finally:
-                        self._suppress = False
+                        paths = [t.path for t in playlist.tracks]
+                        current = playlist.current()
+                        name = self._display(path, current.title) if current else "MusicBox"
+                        cover = None
+                        try:
+                            cover = self._cover_path(path)
+                        except Exception:
+                            cover = None
+                        self.audio.play(path, index, paths, self._repeat_int(), name, cover, resume_ms=pos_ms)
+                        self._update_now_label(current)
+                        self._set_play_icon()
+                    else:
+                        self._suppress = True
+                        try:
+                            self.audio.play_file(path)
+                            self.audio.pause()
+                            pos_sec = max(0, int(resume.get("position_ms", 0))) / 1000.0
+                            self.audio.set_resume_position(pos_sec)
+                            Clock.schedule_once(lambda dt: self.audio.seek(pos_sec), 0.3)
+                            self._update_now_label(playlist.current())
+                        finally:
+                            self._suppress = False
         self._suppress = False

@@ -1,185 +1,165 @@
 """Warstwa odtwarzania audio.
 
-Na Androidzie: android.media.MediaPlayer bezposrednio przez jnius (pomija
-kivy.core.audio.audio_android, ktore na tym p4a spada na ImportError — brak
-android.api_version — co wymuszalo SLD2: martwy suwak (pos=0), brak seeka
-i crash przy pauzie aplikacji). Na desktopie: kivy.core.audio.SoundLoader.
+Na Androidzie: KeepAliveService (Java) trzyma MediaPlayera — dzieki temu
+przyciski powiadomienia dzialaja w tle nawet gdy petla Kivy jest zamrozona
+(Moto/Xiaomi). Python wysyla komendy do serwisu i odbiera stan/pozycje
+przez broadcasty. Na desktopie: kivy.core.audio.SoundLoader.
 """
 import os
 
 from kivy.clock import Clock
 from kivy.core.audio import SoundLoader
 
+from musicbox import android_io
+
 _END_EPSILON = 0.15
 
+CMD_PLAY = "org.musicbox.musicbox.cmd.PLAY"
+CMD_PAUSE = "org.musicbox.musicbox.cmd.PAUSE"
+CMD_RESUME = "org.musicbox.musicbox.cmd.RESUME"
+CMD_NEXT = "org.musicbox.musicbox.cmd.NEXT"
+CMD_PREV = "org.musicbox.musicbox.cmd.PREV"
+CMD_STOP = "org.musicbox.musicbox.cmd.STOP"
+CMD_SEEK = "org.musicbox.musicbox.cmd.SEEK"
+CMD_REPEAT = "org.musicbox.musicbox.cmd.REPEAT"
 
-def _is_android():
-    return bool(
-        os.environ.get("ANDROID_ARGUMENT")
-        or os.environ.get("ANDROID_APP_PATH")
-        or os.environ.get("P4A_BOOTSTRAP")
-    )
-
-
-try:
-    from jnius import autoclass, java_method, PythonJavaClass
-
-    class _CompletionListener(PythonJavaClass):
-        __javainterfaces__ = ["android/media/MediaPlayer$OnCompletionListener"]
-        __javacontext__ = "app"
-
-        def __init__(self, callback):
-            super(_CompletionListener, self).__init__()
-            self._callback = callback
-
-        @java_method("(Landroid/media/MediaPlayer;)V")
-        def onCompletion(self, mp):
-            if self._callback is not None:
-                self._callback()
-
-except Exception:
-    _CompletionListener = None
+STATE_CHANGED = "org.musicbox.musicbox.state.CHANGED"
+STATE_POSITION = "org.musicbox.musicbox.state.POSITION"
 
 
-class _AndroidPlayer:
-    def __init__(self):
-        self._player = None
-        self._listener = None
+class _ServiceAudio:
+    """Klient KeepAliveService (Java MediaPlayer). Stan z broadcastow."""
 
-    def load(self, path, on_ended):
-        self.release()
-        player = autoclass("android.media.MediaPlayer")()
-        audio_manager = autoclass("android.media.AudioManager")
-        attributes = (
-            autoclass("android.media.AudioAttributes$Builder")()
-            .setLegacyStreamType(audio_manager.STREAM_MUSIC)
-            .build()
-        )
-        player.setAudioAttributes(attributes)
-        player.setDataSource(path)
-        player.prepare()
-        listener = _CompletionListener(on_ended)
-        player.setOnCompletionListener(listener)
-        self._player = player
-        self._listener = listener
-
-    def play(self):
-        if self._player is not None:
-            self._player.start()
-
-    def pause(self):
-        if self._player is not None:
-            self._player.pause()
-
-    def stop(self):
-        if self._player is not None:
-            try:
-                self._player.stop()
-            except Exception:
-                pass
-
-    def seek(self, position):
-        if self._player is not None:
-            self._player.seekTo(int(max(0.0, float(position)) * 1000))
-
-    def position(self):
-        if self._player is None:
-            return 0.0
-        try:
-            return self._player.getCurrentPosition() / 1000.0
-        except Exception:
-            return 0.0
-
-    def length(self):
-        if self._player is None:
-            return 0.0
-        try:
-            duration = self._player.getDuration()
-            if duration and duration > 0:
-                return duration / 1000.0
-        except Exception:
-            pass
-        return 0.0
-
-    def set_volume(self, volume):
-        if self._player is not None:
-            try:
-                self._player.setVolume(float(volume), float(volume))
-            except Exception:
-                pass
-
-    def release(self):
-        if self._player is not None:
-            try:
-                self._player.release()
-            except Exception:
-                pass
-        self._player = None
-        self._listener = None
-
-
-class AudioPlayer:
     def __init__(self, on_ended=None, on_tick=None, volume=1.0):
-        self._android = _AndroidPlayer() if _is_android() else None
-        self.sound = None
-        self._source = None
-        self._volume = volume
-        self._pause_pos = 0.0
-        self._ended_armed = False
-        self._clock = None
         self._playing = False
+        self._position = 0.0
+        self._length = 0.0
+        self._source = None
         self.on_ended = on_ended
         self.on_tick = on_tick
 
     def provider_name(self):
-        return "android" if self._android is not None else "kivy"
+        return "android-service"
 
-    # ---------- stan ----------
     @property
     def is_playing(self):
-        if self._android is not None:
-            return self._playing
-        return self.sound is not None and self.sound.state == "play"
-
-    @property
-    def volume(self):
-        return self._volume
+        return self._playing
 
     @property
     def current_source(self):
         return self._source
 
+    @property
+    def volume(self):
+        return 1.0
+
     def position(self):
-        if self._android is not None:
-            return self._android.position()
+        return self._position
+
+    def length(self):
+        return self._length
+
+    def play(self, path, index, paths, repeat, title="", cover=None, resume_ms=0):
+        android_io.send_playback_command(
+            CMD_PLAY,
+            path=path,
+            index=int(index),
+            paths="\n".join(paths),
+            repeat=int(repeat),
+            title=title or "",
+            cover=cover or "",
+            resume_ms=int(resume_ms),
+        )
+        self._source = path
+
+    def play_file(self, path):
+        return False
+
+    def pause(self):
+        self._playing = False
+        android_io.send_playback_command(CMD_PAUSE)
+
+    def resume(self):
+        android_io.send_playback_command(CMD_RESUME)
+
+    def replay(self):
+        android_io.send_playback_command(CMD_SEEK, position_ms=0)
+        android_io.send_playback_command(CMD_RESUME)
+
+    def stop(self):
+        self._playing = False
+        android_io.send_playback_command(CMD_STOP)
+
+    def seek(self, position):
+        android_io.send_playback_command(
+            CMD_SEEK, position_ms=int(max(0.0, float(position)) * 1000)
+        )
+
+    def set_resume_position(self, position):
+        pass
+
+    def set_volume(self, value):
+        pass
+
+    def set_repeat(self, repeat):
+        android_io.send_playback_command(CMD_REPEAT, repeat=int(repeat))
+
+    def apply_state(self, path, index, playing, ended, title, cover):
+        if path:
+            self._source = path
+        self._playing = bool(playing)
+        if ended:
+            self._playing = False
+            self._position = 0.0
+
+    def apply_position(self, position_ms, duration_ms):
+        self._position = position_ms / 1000.0
+        if duration_ms and duration_ms > 0:
+            self._length = duration_ms / 1000.0
+        if self.on_tick is not None:
+            self.on_tick(self._position, self._length)
+
+
+class _DesktopAudio:
+    """Kivy SoundLoader (desktop)."""
+
+    def __init__(self, on_ended=None, on_tick=None, volume=1.0):
+        self.sound = None
+        self._volume = volume
+        self._pause_pos = 0.0
+        self._ended_armed = False
+        self._clock = None
+        self._source = None
+        self.on_ended = on_ended
+        self.on_tick = on_tick
+
+    def provider_name(self):
+        return "kivy"
+
+    @property
+    def is_playing(self):
+        return self.sound is not None and self.sound.state == "play"
+
+    @property
+    def current_source(self):
+        return self._source
+
+    @property
+    def volume(self):
+        return self._volume
+
+    def position(self):
         if self.sound is None:
             return 0.0
         return self.sound.get_pos() or 0.0
 
     def length(self):
-        if self._android is not None:
-            return self._android.length()
         if self.sound is None:
             return 0.0
         return self.sound.length or 0.0
 
-    # ---------- sterowanie ----------
     def play_file(self, path):
         self._stop_clock()
-        if self._android is not None:
-            try:
-                self._android.load(path, self._on_android_ended)
-            except Exception:
-                self._source = None
-                self._playing = False
-                return False
-            self._android.play()
-            self._source = path
-            self._pause_pos = 0.0
-            self._ended_armed = True
-            self._playing = True
-            self._clock = Clock.schedule_interval(self._tick, 0.25)
-            return True
         if self.sound is not None:
             try:
                 self.sound.stop()
@@ -190,7 +170,6 @@ class AudioPlayer:
         sound = SoundLoader.load(path)
         if sound is None:
             self._source = None
-            self._playing = False
             return False
         self.sound = sound
         self.sound.volume = self._volume
@@ -198,31 +177,18 @@ class AudioPlayer:
         self._source = path
         self._pause_pos = 0.0
         self._ended_armed = True
-        self._playing = True
         self._clock = Clock.schedule_interval(self._tick, 0.25)
         return True
 
     def pause(self):
         self._stop_clock()
         self._ended_armed = False
-        self._playing = False
-        if self._android is not None:
-            self._pause_pos = self._android.position()
-            self._android.pause()
-            return
         if self.sound is None:
             return
         self._pause_pos = self.sound.get_pos() or 0.0
         self.sound.stop()
 
     def resume(self):
-        if self._android is not None:
-            self._android.seek(self._pause_pos)
-            self._android.play()
-            self._ended_armed = True
-            self._playing = True
-            self._clock = Clock.schedule_interval(self._tick, 0.25)
-            return
         if self.sound is None:
             return
         try:
@@ -231,17 +197,9 @@ class AudioPlayer:
             pass
         self.sound.play()
         self._ended_armed = True
-        self._playing = True
         self._clock = Clock.schedule_interval(self._tick, 0.25)
 
     def replay(self):
-        if self._android is not None:
-            self._android.seek(0)
-            self._android.play()
-            self._ended_armed = True
-            self._playing = True
-            self._clock = Clock.schedule_interval(self._tick, 0.25)
-            return
         if self.sound is None:
             return
         try:
@@ -250,17 +208,11 @@ class AudioPlayer:
             pass
         self.sound.play()
         self._ended_armed = True
-        self._playing = True
         self._clock = Clock.schedule_interval(self._tick, 0.25)
 
     def stop(self):
         self._stop_clock()
         self._ended_armed = False
-        self._playing = False
-        if self._android is not None:
-            self._android.release()
-            self._source = None
-            return
         if self.sound is not None:
             try:
                 self.sound.stop()
@@ -271,9 +223,6 @@ class AudioPlayer:
         self._source = None
 
     def seek(self, position):
-        if self._android is not None:
-            self._android.seek(position)
-            return
         if self.sound is None:
             return
         try:
@@ -286,36 +235,16 @@ class AudioPlayer:
 
     def set_volume(self, value):
         self._volume = max(0.0, min(1.0, float(value)))
-        if self._android is not None:
-            self._android.set_volume(self._volume)
-            return
         if self.sound is not None:
             self.sound.volume = self._volume
 
-    # ---------- wewnetrzne ----------
     def _tick(self, dt):
         length = self.length()
         pos = self.position()
         if self.on_tick is not None:
             self.on_tick(pos, length)
-        if (
-            self._android is None
-            and self._ended_armed
-            and length > 1.0
-            and pos >= length - _END_EPSILON
-        ):
+        if self._ended_armed and length > 1.0 and pos >= length - _END_EPSILON:
             self._ended_armed = False
-            self._stop_clock()
-            if self.on_ended is not None:
-                self.on_ended()
-
-    def _on_android_ended(self):
-        Clock.schedule_once(lambda dt: self._android_ended_main(), 0)
-
-    def _android_ended_main(self):
-        if self._playing:
-            self._ended_armed = False
-            self._playing = False
             self._stop_clock()
             if self.on_ended is not None:
                 self.on_ended()
@@ -324,3 +253,81 @@ class AudioPlayer:
         if self._clock is not None:
             self._clock.cancel()
             self._clock = None
+
+
+class AudioPlayer:
+    def __init__(self, on_ended=None, on_tick=None, volume=1.0):
+        self._volume = volume
+        if android_io.is_android():
+            self._backend = _ServiceAudio(on_ended, on_tick, volume)
+        else:
+            self._backend = _DesktopAudio(on_ended, on_tick, volume)
+
+    def provider_name(self):
+        return self._backend.provider_name()
+
+    @property
+    def is_playing(self):
+        return self._backend.is_playing
+
+    @property
+    def current_source(self):
+        return self._backend.current_source
+
+    @property
+    def volume(self):
+        return self._volume
+
+    def position(self):
+        return self._backend.position()
+
+    def length(self):
+        return self._backend.length()
+
+    def play_file(self, path):
+        return self._backend.play_file(path)
+
+    def play(self, path, index, paths, repeat, title="", cover=None, resume_ms=0):
+        self._backend.play(path, index, paths, repeat, title, cover, resume_ms)
+
+    def pause(self):
+        self._backend.pause()
+
+    def resume(self):
+        self._backend.resume()
+
+    def replay(self):
+        self._backend.replay()
+
+    def stop(self):
+        self._backend.stop()
+
+    def next_track(self):
+        if android_io.is_android():
+            android_io.send_playback_command(CMD_NEXT)
+
+    def prev_track(self):
+        if android_io.is_android():
+            android_io.send_playback_command(CMD_PREV)
+
+    def seek(self, position):
+        self._backend.seek(position)
+
+    def set_resume_position(self, position):
+        self._backend.set_resume_position(position)
+
+    def set_volume(self, value):
+        self._volume = max(0.0, min(1.0, float(value)))
+        self._backend.set_volume(self._volume)
+
+    def set_repeat(self, repeat):
+        if hasattr(self._backend, "set_repeat"):
+            self._backend.set_repeat(repeat)
+
+    def apply_state(self, path, index, playing, ended, title, cover):
+        if hasattr(self._backend, "apply_state"):
+            self._backend.apply_state(path, index, playing, ended, title, cover)
+
+    def apply_position(self, position_ms, duration_ms):
+        if hasattr(self._backend, "apply_position"):
+            self._backend.apply_position(position_ms, duration_ms)
