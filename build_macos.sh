@@ -49,9 +49,12 @@ fetch_raw "$YTDLP_URL" "bin/macos/x86_64/yt-dlp"
 fetch_zip "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip" "bin/macos/arm64" "deno"
 fetch_zip "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip" "bin/macos/x86_64" "deno"
 
-# ffmpeg (static build) — arm64 i x86_64
-fetch_zip "https://evermeet.cx/ffmpeg/getrelease/arm64/zip" "bin/macos/arm64" "ffmpeg"
+# ffmpeg (static, evermeet x86_64) — na arm64 używamy x86_64 (na M1 działa przez Rosetta 2)
 fetch_zip "https://evermeet.cx/ffmpeg/getrelease/zip" "bin/macos/x86_64" "ffmpeg"
+if [ -f bin/macos/x86_64/ffmpeg ] && [ ! -f bin/macos/arm64/ffmpeg ]; then
+    cp -f bin/macos/x86_64/ffmpeg bin/macos/arm64/ffmpeg
+    echo "[tools] ffmpeg arm64 = x86_64 (M1: przez Rosetta 2)"
+fi
 
 # CI: wszystkie narzędzia obowiazkowe (apka bez ffmpeg/yt-dlp/deno jest bezuzyteczna)
 if [ "${MUSICBOX_TOOLS_REQUIRED:-0}" = "1" ]; then
