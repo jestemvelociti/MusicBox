@@ -180,6 +180,7 @@ KV = """
 #:import OneLineListItem kivymd.uix.list.OneLineListItem
 #:import MDScreen kivymd.uix.screen.MDScreen
 #:import MDTextField kivymd.uix.textfield.MDTextField
+#:import MarqueeLabel musicbox.marquee.MarqueeLabel
 
 <PlayerBar@BoxLayout>:
     orientation: "vertical"
@@ -193,30 +194,19 @@ KV = """
         Rectangle:
             pos: self.pos
             size: self.size
-    MDLabel:
+    MarqueeLabel:
         id: track_label
         text: "Brak utworu"
-        theme_text_color: "Custom"
         text_color: 1, 1, 1, 1
         bold: True
-        halign: "center"
-        valign: "middle"
-        shorten: True
-        shorten_from: "center"
-        text_size: self.width, None
+        font_size: sp(15)
         size_hint_y: None
         height: dp(26)
-    MDLabel:
+    MarqueeLabel:
         id: artist_label
         text: ""
-        theme_text_color: "Custom"
         text_color: 0.6, 0.68, 0.83, 1
-        font_size: "12sp"
-        halign: "center"
-        valign: "top"
-        shorten: True
-        shorten_from: "center"
-        text_size: self.width, None
+        font_size: sp(12)
         size_hint_y: None
         height: dp(18)
     BoxLayout:
@@ -521,6 +511,8 @@ class MusicBoxApp(MDApp):
         self._stats_period_key = None
         self._month_selection = None
         self._year_selection = None
+        self._summary_card_btn = None
+        self._summary_generating = False
         self._m3u_last = None
         self._tags_lock = threading.Lock()
         self._scan_lock = threading.Lock()
@@ -632,7 +624,7 @@ class MusicBoxApp(MDApp):
             pass
 
     def _log_env(self):
-        self._debug_log("=== MusicBox start (0.5.1) ===")
+        self._debug_log("=== MusicBox start (0.6.1) ===")
         self._debug_log("api_level=%s android=%s" % (android_io.android_api_level(), android_io.is_android()))
         if android_io.is_android():
             self._debug_log("all_files_access=%s" % android_io.all_files_access())
@@ -660,8 +652,13 @@ class MusicBoxApp(MDApp):
             except Exception as e:
                 self._debug_log("startup: blad load_saved " + repr(e))
             try:
-                new = self._scan_new_playlists(set(p.name for p in playlists))
+                new, removed = self._scan_new_playlists(
+                    set(p.name for p in playlists), playlists
+                )
                 playlists.extend(new)
+                for name in removed:
+                    storage.delete_playlist(name)
+                    self._debug_log("skan: usunieto " + name)
             except Exception as e:
                 self._debug_log("startup: blad skan " + repr(e))
             Clock.schedule_once(lambda dt: self._startup_applied(playlists), 0)
@@ -669,7 +666,11 @@ class MusicBoxApp(MDApp):
         threading.Thread(target=work, daemon=True).start()
 
     def _startup_applied(self, playlists):
-        self.library.playlists = playlists
+        known = {p.name for p in self.library.playlists}
+        for pl in playlists:
+            if pl.name not in known:
+                self.library.playlists.append(pl)
+                known.add(pl.name)
         self._restore_resume()
         self._refresh_home()
         self._sync_profile_in()
@@ -680,10 +681,16 @@ class MusicBoxApp(MDApp):
 
         def work():
             try:
-                new = self._scan_new_playlists({p.name for p in self.library.playlists})
+                new, removed = self._scan_new_playlists(
+                    {p.name for p in self.library.playlists},
+                    list(self.library.playlists),
+                )
             except Exception:
-                new = []
-            Clock.schedule_once(lambda dt: self._apply_new_playlists(new), 0)
+                new, removed = [], []
+            finally:
+                with self._scan_lock:
+                    self._scanning = False
+            Clock.schedule_once(lambda dt: self._apply_scan(new, removed), 0)
 
         with self._scan_lock:
             if self._scanning:
@@ -691,7 +698,7 @@ class MusicBoxApp(MDApp):
             self._scanning = True
         threading.Thread(target=work, daemon=True).start()
 
-    def _scan_new_playlists(self, known):
+    def _scan_new_playlists(self, known, playlists):
         new = []
         for folder in self._playlist_folders():
             if not folder or not os.path.isdir(folder):
@@ -719,25 +726,48 @@ class MusicBoxApp(MDApp):
                     known.add(pl.name)
                     new.append(pl)
                     self._debug_log("skan: dodano " + pl.name)
-        with self._scan_lock:
-            self._scanning = False
+        external = android_io.musicbox_dir() if android_io.is_android() else None
+        _, removed = storage.prune_missing(playlists, external)
+        if removed:
+            self._debug_log("skan: %d playlist bez zrodla: %s" % (len(removed), removed))
         if new:
             self._debug_log("skan: %d nowych playlist" % len(new))
-        return new
+        return new, removed
 
-    def _apply_new_playlists(self, new):
-        if not new:
-            return
-        known = {p.name for p in self.library.playlists}
-        added = 0
-        for pl in new:
-            if pl.name in known:
-                continue
-            self.library.add_playlist(pl)
-            known.add(pl.name)
-            added += 1
-        if added:
+    def _apply_scan(self, new, removed):
+        changed = False
+        for name in removed:
+            self._remove_playlist_by_name(name)
+            changed = True
+        if new:
+            known = {p.name for p in self.library.playlists}
+            for pl in new:
+                if pl.name in known:
+                    continue
+                self.library.add_playlist(pl)
+                known.add(pl.name)
+                changed = True
+        if changed:
             self._refresh_home()
+
+    def _remove_playlist_by_name(self, name):
+        for pl in list(self.library.playlists):
+            if pl.name != name:
+                continue
+            if self.controller.playlist is pl:
+                try:
+                    self.audio.stop()
+                except Exception:
+                    pass
+                android_io.stop_playback_service()
+                self._clear_resume()
+            self.library.playlists.remove(pl)
+            external = android_io.musicbox_dir() if android_io.is_android() else None
+            storage.delete_source_file(name, external)
+            storage.delete_playlist(name)
+            self._flash_status("Usunięto playlistę: " + name)
+            self._debug_log("usunieto " + name)
+            return
 
     def _log_fuse_latency(self):
         paths = []
@@ -1027,7 +1057,16 @@ class MusicBoxApp(MDApp):
             md_bg_color=(0.07, 0.1, 0.22, 1),
             padding=dp(8),
             spacing=dp(4),
-            on_release=lambda *a, idx=index: self.open_playlist(idx),
+        )
+        card._tile_index = index
+        card._down_pos = None
+        card._down_touch = None
+        card._long_timer = None
+        card._long_fired = False
+        card.bind(
+            on_touch_down=self._tile_touch_down,
+            on_touch_up=self._tile_touch_up,
+            on_touch_move=self._tile_touch_move,
         )
         thumb = MDBoxLayout(
             size_hint_y=None,
@@ -1071,6 +1110,148 @@ class MusicBoxApp(MDApp):
             )
         )
         return card
+
+    def _tile_touch_down(self, tile, touch):
+        if tile.collide_point(*touch.pos):
+            tile._down_pos = (touch.x, touch.y)
+            tile._down_touch = touch
+            tile._long_fired = False
+            tile._long_timer = Clock.schedule_once(
+                lambda dt: self._tile_long_fired(tile), 0.5
+            )
+            self._debug_log("tile: down idx=%s pos=%s" % (tile._tile_index, touch.pos))
+        return False
+
+    def _tile_touch_up(self, tile, touch):
+        self._tile_cancel(tile)
+        if tile._long_fired:
+            tile._long_fired = False
+            tile._down_pos = None
+            tile._down_touch = None
+            return True
+        if tile.collide_point(*touch.pos) and tile._down_pos is not None:
+            dx = abs(touch.x - tile._down_pos[0])
+            dy = abs(touch.y - tile._down_pos[1])
+            if dx < dp(10) and dy < dp(10):
+                self.open_playlist(tile._tile_index)
+        tile._down_pos = None
+        tile._down_touch = None
+        return False
+
+    def _tile_touch_move(self, tile, touch):
+        if tile._down_pos is not None:
+            dx = abs(touch.x - tile._down_pos[0])
+            dy = abs(touch.y - tile._down_pos[1])
+            if dx >= dp(30) or dy >= dp(30):
+                self._tile_cancel(tile)
+                tile._down_pos = None
+        return False
+
+    def _tile_cancel(self, tile):
+        if tile._long_timer is not None:
+            tile._long_timer.cancel()
+            tile._long_timer = None
+
+    def _tile_long_fired(self, tile):
+        tile._long_timer = None
+        if tile._down_touch is None:
+            self._debug_log("tile: long BAIL (down_touch None)")
+            tile._down_pos = None
+            return
+        if tile.parent is None:
+            self._debug_log("tile: long BAIL (parent None)")
+            tile._down_pos = None
+            return
+        if not tile.collide_point(*tile._down_touch.pos):
+            self._debug_log(
+                "tile: long BAIL (poza kafelkiem) pos=%s" % (tile._down_touch.pos,)
+            )
+            tile._down_pos = None
+            return
+        tile._long_fired = True
+        self._debug_log("tile: LONG fired idx=%s" % tile._tile_index)
+        self._show_playlist_menu(tile._tile_index)
+
+    def _show_playlist_menu(self, index):
+        if not (0 <= index < len(self.library.playlists)):
+            self._debug_log("menu: BAIL index=%s poza zakresem" % index)
+            return
+        pl = self.library.playlists[index]
+        try:
+            from kivymd.uix.dialog import MDDialog
+
+            dialog = MDDialog(
+                title=pl.name,
+                type="simple",
+                items=[
+                    OneLineListItem(
+                        text="Usuń",
+                        theme_text_color="Custom",
+                        text_color=(1, 0.3, 0.3, 1),
+                        on_release=lambda *a: self._ask_delete_playlist(pl.name, dialog),
+                    ),
+                    OneLineListItem(text="Anuluj", on_release=lambda *a: dialog.dismiss()),
+                ],
+            )
+            dialog.open()
+            self._debug_log("menu: MDDialog otwarty idx=%s" % index)
+        except Exception as e:
+            self._debug_log("menu: MDDialog FAILED: %r" % (e,))
+            self._flash_delete_fallback(pl.name)
+
+    def _flash_delete_fallback(self, name):
+        """Fallback gdy MDDialog nie działa — Snackbar z przyciskiem Usuń."""
+        try:
+            from kivymd.uix.snackbar import Snackbar
+
+            Snackbar(
+                text="Usunąć playlistę „%s”?" % name,
+                snackbar_x="12dp",
+                snackbar_y="150dp",
+                size_hint_x=0.9,
+                duration=4,
+                buttons=[
+                    MDRectangleFlatButton(
+                        text="Usuń",
+                        text_color=(1, 0.3, 0.3, 1),
+                        on_release=lambda *a: self._delete_playlist(name),
+                    )
+                ],
+            ).open()
+        except Exception as e:
+            self._debug_log("menu: Snackbar fallback FAILED: %r" % (e,))
+            self._delete_playlist(name)
+
+    def _ask_delete_playlist(self, name, parent):
+        try:
+            parent.dismiss()
+        except Exception:
+            pass
+        try:
+            from kivymd.uix.dialog import MDDialog
+        except Exception:
+            self._remove_playlist_by_name(name)
+            self._refresh_home()
+            return
+        confirm = MDDialog(
+            title="Usunąć playlistę?",
+            text="„%s” i jej plik .m3u z folderu MusicBox/" % name,
+            buttons=[
+                MDRectangleFlatButton(text="Anuluj", on_release=lambda *a: confirm.dismiss()),
+                MDRectangleFlatButton(
+                    text="Usuń",
+                    on_release=lambda *a: (confirm.dismiss(), self._delete_playlist(name)),
+                ),
+            ],
+        )
+        confirm.open()
+
+    def _delete_playlist(self, name):
+        self._remove_playlist_by_name(name)
+        if self.root.ids.manager.current == "playlist":
+            self.show_home()
+        else:
+            self._refresh_home()
 
     def open_playlist(self, index):
         pl = self.library.switch_to(index)
@@ -1119,7 +1300,9 @@ class MusicBoxApp(MDApp):
         try:
             filechooser.open_file(
                 filters=[("Playlisty", "*.m3u", "*.m3u8")],
-                on_selection=self._on_import_selected,
+                on_selection=lambda sel: Clock.schedule_once(
+                    lambda dt, s=sel: self._on_import_selected(s)
+                ),
             )
         except Exception:
             self._flash_status("Błąd przy wyborze pliku")
@@ -1137,23 +1320,41 @@ class MusicBoxApp(MDApp):
             return
         uri = selection[0]
         self._debug_log("import: uri=" + str(uri))
-        path = android_io.resolve_playlist_path(uri)
-        if not path:
-            self._debug_log("import: resolve_playlist_path zwrocilo None")
+        threading.Thread(target=self._import_worker, args=(uri,), daemon=True).start()
+
+    def _import_worker(self, uri):
+        pl = None
+        try:
+            path = android_io.resolve_playlist_path(uri)
+            if not path:
+                self._debug_log("import: resolve_playlist_path zwrocilo None")
+                Clock.schedule_once(
+                    lambda dt: self._flash_status("Nie udało się odczytać pliku"), 0
+                )
+                return
+            self._debug_log("import: path=" + str(path))
+            pl = Playlist()
+            loaded = 0
+            try:
+                loaded = pl.load_m3u(path)
+            except OSError:
+                loaded = 0
+            if loaded == 0:
+                self._debug_log("import: load_m3u=0, proba materializacji")
+                self._try_materialized_m3u(pl, path)
+        except Exception as e:
+            self._debug_log("import: blad " + repr(e))
+            pl = None
+        finally:
+            android_io.cleanup_import_files()
+        Clock.schedule_once(lambda dt, p=pl: self._import_applied(p), 0)
+
+    def _import_applied(self, pl):
+        if pl is None:
             self._flash_status("Nie udało się odczytać pliku")
             return
-        self._debug_log("import: path=" + str(path))
-        pl = Playlist()
-        loaded = 0
-        try:
-            loaded = pl.load_m3u(path)
-        except OSError:
-            loaded = 0
-        if loaded == 0:
-            self._try_materialized_m3u(pl, path)
-        android_io.cleanup_import_files()
         if not pl.tracks:
-            self._debug_log("import: 0 utworow z " + str(path))
+            self._debug_log("import: 0 utworow")
             self._flash_status(
                 "Brak utworów. Sprawdź, czy aplikacja ma zgodę na multimedia i czy .m3u wskazuje istniejące pliki."
             )
@@ -1278,18 +1479,18 @@ class MusicBoxApp(MDApp):
         if ended:
             self._set_play_icon()
             self._clear_resume()
+            self._last_state_path = ""
             return
         pl = self.controller.playlist
-        if pl is not None:
-            natural = -1
-            if path:
-                for i, t in enumerate(pl.tracks):
-                    if t.path == path:
-                        natural = i
-                        break
-            if natural >= 0:
-                pl.current_index = natural
-        if playing and path and path != self._last_state_path:
+        matched = -1
+        if pl is not None and path:
+            for i, t in enumerate(pl.tracks):
+                if t.path == path:
+                    matched = i
+                    break
+            if matched >= 0:
+                pl.current_index = matched
+        if playing and path and matched >= 0 and path != self._last_state_path:
             self._last_state_path = path
             if pl is not None and pl.current() is not None:
                 self._update_now_label(pl.current())
@@ -1368,6 +1569,8 @@ class MusicBoxApp(MDApp):
                 for i in range(len(order)):
                     q.put(i)
                 q.join()
+                for _ in range(4):
+                    q.put(None)
                 self._debug_log("meta: okładki gotowe")
                 self.audio.send_meta(names, covers, has_covers=True)
                 self._debug_log("meta: wyslano %d utworow" % len(order))
@@ -1699,7 +1902,9 @@ class MusicBoxApp(MDApp):
             from plyer import filechooser
             filechooser.open_file(
                 filters=[("Profil", "*.json")],
-                on_selection=self._on_profile_selected,
+                on_selection=lambda sel: Clock.schedule_once(
+                    lambda dt, s=sel: self._on_profile_selected(s)
+                ),
             )
         except Exception:
             self._flash_status("Brak plyer — nie można wybrać pliku")
@@ -1711,10 +1916,12 @@ class MusicBoxApp(MDApp):
         if not selection:
             return
         if self.stats.import_(selection[0]):
+            android_io.cleanup_import_files()
             self._sync_profile_out()
             self._refresh_stats()
             self._flash_status("Zaimportowano profil")
         else:
+            android_io.cleanup_import_files()
             self._flash_status("Nie udało się wczytać profilu")
 
     def _sync_profile_out(self):
@@ -1766,6 +1973,93 @@ class MusicBoxApp(MDApp):
         if label is not None:
             label.text = text
 
+    def _current_summary(self):
+        """(etykieta, summary) dla aktualnie wybranego okresu albo None."""
+        if self._stats_period_kind == "month" and self._stats_period_key:
+            s = self.stats.month_summary(self._stats_period_key)
+            if s:
+                return (self._month_label(self._stats_period_key), s)
+        elif self._stats_period_kind == "year" and self._stats_period_key:
+            for s in self.stats.year_summaries():
+                if int(s.get("year", 0)) == self._stats_period_key:
+                    return ("Rok {}".format(self._stats_period_key), s)
+        return None
+
+    def _update_summary_button(self):
+        btn = getattr(self, "_summary_card_btn", None)
+        if btn is None:
+            return
+        has = self._current_summary() is not None and not self._summary_generating
+        btn.disabled = not has
+        btn.md_bg_color = (0.24, 0.48, 1, 1) if has else (0.16, 0.18, 0.28, 1)
+
+    def _on_summary_card(self):
+        current = self._current_summary()
+        if current is None:
+            self._flash_status("Najpierw wybierz miesiąc lub rok")
+            return
+        if self._summary_generating:
+            return
+        label, summary = current
+        self._summary_generating = True
+        btn = getattr(self, "_summary_card_btn", None)
+        if btn is not None:
+            btn.disabled = True
+            btn.text = "Generowanie…"
+        profile = self.stats.profile_name or "MusicBox"
+        cover_dir = self._cover_cache_dir()
+        threading.Thread(
+            target=self._summary_card_worker,
+            args=(profile, label, summary, cover_dir),
+            daemon=True,
+        ).start()
+
+    def _summary_card_worker(self, profile, label, summary, cover_dir):
+        from io import BytesIO
+
+        from core.summary_pillow import render_summary_card
+
+        try:
+            image = render_summary_card(profile, label, summary, cover_dir=cover_dir)
+            buf = BytesIO()
+            image.save(buf, "PNG")
+            data = buf.getvalue()
+            slug = label.lower().replace(" ", "_")
+            name = "podsumowanie_{}.png".format(
+                "".join(c if c.isalnum() else "_" for c in slug)
+            )
+            saved = android_io.save_summary_png(data, name)
+        except Exception as e:
+            self._debug_log("summary_card: blad " + repr(e))
+            saved, error = None, "Nie udało się wygenerować karty"
+        else:
+            error = None
+        Clock.schedule_once(
+            lambda dt: self._summary_card_done(saved, (saved or {}).get("uri"), error), 0
+        )
+
+    def _summary_card_done(self, saved, uri, error):
+        self._summary_generating = False
+        btn = getattr(self, "_summary_card_btn", None)
+        if btn is not None:
+            btn.text = "Karta + udostępnij"
+        self._update_summary_button()
+        if error:
+            self._flash_status(error)
+            return
+        path = (saved or {}).get("path")
+        if uri:
+            self._debug_log("summary_card: zapisano path=%s uri=%s" % (path, uri))
+            if android_io.share_file(uri):
+                self._flash_status("Karta zapisana i udostępniona")
+                return
+            self._flash_status("Karta zapisana (udostępnianie niedostępne)")
+            return
+        if path:
+            self._flash_status("Karta zapisana: " + os.path.basename(path))
+            return
+        self._flash_status("Nie udało się zapisać karty")
+
     def _on_month_spinner(self, text):
         for key in self.stats.months():
             if self._month_label(key) == text:
@@ -1773,6 +2067,7 @@ class MusicBoxApp(MDApp):
                 self._stats_period_key = key
                 self._month_selection = text
                 self._render_active_summary()
+                self._update_summary_button()
                 return
 
     def _on_year_spinner(self, text):
@@ -1784,6 +2079,7 @@ class MusicBoxApp(MDApp):
         self._stats_period_key = year
         self._year_selection = text
         self._render_active_summary()
+        self._update_summary_button()
 
     def _refresh_stats(self):
         self.stats.maybe_create_year_summary(date.today())
@@ -1903,7 +2199,16 @@ class MusicBoxApp(MDApp):
         summary.bind(texture_size=lambda *a: setattr(summary, "height", summary.texture_size[1]))
         self._summary_label = summary
         content.add_widget(summary)
+        card_btn = MDRectangleFlatButton(
+            text="Karta + udostępnij",
+            size_hint_y=None,
+            height=dp(44),
+            on_release=lambda *a: self._on_summary_card(),
+        )
+        self._summary_card_btn = card_btn
+        content.add_widget(card_btn)
         self._render_active_summary()
+        self._update_summary_button()
 
     # ---------- zapamiętywanie sesji ----------
     def _find_playlist_by_path(self, path):

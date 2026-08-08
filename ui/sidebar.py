@@ -20,6 +20,7 @@ class Sidebar(QFrame):
     libraryRequested = Signal()
     statsRequested = Signal()
     addRequested = Signal()
+    importRequested = Signal()
     downloadRequested = Signal()
 
     def __init__(self, parent=None):
@@ -67,6 +68,12 @@ class Sidebar(QFrame):
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_btn.clicked.connect(self.addRequested)
         layout.addWidget(self.add_btn)
+
+        self.import_btn = QPushButton("⇧ Importuj .m3u")
+        self.import_btn.setObjectName("homeBtn")
+        self.import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_btn.clicked.connect(self.importRequested)
+        layout.addWidget(self.import_btn)
 
         self.download_btn = QPushButton("⤓ Pobierz playlistę")
         self.download_btn.setObjectName("downloadPlaylistBtn")

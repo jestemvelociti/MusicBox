@@ -54,6 +54,35 @@ python -m PyInstaller MusicBox.spec --noconfirm
 
 Exe musi być zamknięty podczas budowy (inaczej `PermissionError`).
 
+## Budowa wersji macOS
+
+Wersja macOS to ten sam kod (PySide6). Build robi się **na Macu** (PyInstaller nie cross-kompiluje z Windows).
+
+**Najprościej:** build przez GitHub Actions (chmura macOS) → pobierasz gotowy `MusicBox.app`.
+Pełna instrukcja krok po kroku: [`MACOS_BUILD.md`](MACOS_BUILD.md).
+
+Wymagania na Macu (opcja lokalna):
+- Python **universal2** (np. z python.org — obie architektury arm64 + x86_64), PySide6 instaluje się jako universal wheel.
+- `iconutil` (jest wbudowany w macOS) — generuje `assets/icon.icns`.
+
+Build (na Macu, np. MacBook M1 kolegi):
+
+```bash
+chmod +x build_macos.sh
+./build_macos.sh
+# wyniki: dist/MusicBox.app (universal2 — Apple Silicon + Intel)
+```
+
+Skrypt: pobiera narzędzia macOS do `bin/macos/arm64` i `bin/macos/x86_64` (yt-dlp, ffmpeg, deno), generuje `assets/icon.icns`, instaluje zależności i uruchamia `pyinstaller MusicBox_macos.spec`.
+
+Uwagi:
+- Jeżeli pobranie ffmpeg/deno/yt-dlp się nie powiedzie (zmienione URL-e), skrypt ostrzega i aplikacja użyje narzędzi z PATH (np. `brew install ffmpeg deno yt-dlp`).
+- Niesygnowany `.app` → macOS Gatekeeper: prawy klik → **Otwórz**, albo:
+  ```bash
+  xattr -dr com.apple.quarantine dist/MusicBox.app
+  ```
+- Funkcje identyczne jak wersja exe (pobieranie CSV/Spotify, albumy, tagi, ustawienia, pasek).
+
 ## Budowa APK (Android)
 
 Wymaga WSL (Ubuntu) z buildozerem. Pełna procedura i historia w `RESUME_BUILD.md`.
@@ -81,7 +110,7 @@ Ważne w `mobile/buildozer.spec`:
 python -m pytest tests/ -q
 ```
 
-Testy wymagające Qt (`test_main_window.py`, `test_summary_image.py`) uruchamiają się tylko, gdy PySide6 jest zainstalowane.
+Test `test_main_window.py` wymagający Qt uruchamia się tylko, gdy PySide6 jest zainstalowane. Karty podsumowań renderowane są przez Pillow (`core/summary_pillow.py` — działa też na Androidzie, bez Qt).
 
 ---
 

@@ -38,8 +38,9 @@ class Library:
 
     def load_m3u(self, path):
         playlist = Playlist()
-        playlist.load_m3u(path)
-        return self.add_playlist(playlist)
+        if playlist.load_m3u(path) > 0:
+            return self.add_playlist(playlist)
+        return None
 
     def switch_to(self, index):
         if 0 <= index < len(self.playlists):

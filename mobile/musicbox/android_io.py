@@ -803,3 +803,108 @@ def pick_m3u(on_selected):
         return True
     except Exception:
         return False
+
+
+def _media_store_insert_png(data, name):
+    """Wrzuca PNG do MediaStore (Downloads/MusicBox) i zwraca content:// URI."""
+    if not _ANDROID:
+        return None
+    try:
+        from jnius import autoclass
+
+        ContentValues = autoclass("android.content.ContentValues")
+        String = autoclass("java.lang.String")
+        resolver = _activity().getContentResolver()
+        cv = ContentValues()
+        cv.put(String("DISPLAY_NAME"), String(str(name)))
+        cv.put(String("MIME_TYPE"), String("image/png"))
+        if android_api_level() >= 29:
+            cv.put(String("RELATIVE_PATH"), String("Download/MusicBox"))
+            MediaStore = autoclass("android.provider.MediaStore$Downloads")
+        else:
+            MediaStore = autoclass("android.provider.MediaStore$Files")
+        uri = resolver.insert(MediaStore.EXTERNAL_CONTENT_URI, cv)
+        if uri is None:
+            return None
+        stream = resolver.openOutputStream(uri)
+        if stream is None:
+            try:
+                resolver.delete(uri, None, None)
+            except Exception:
+                pass
+            return None
+        try:
+            try:
+                stream.write(bytearray(data))
+            finally:
+                stream.close()
+        except Exception:
+            try:
+                resolver.delete(uri, None, None)
+            except Exception:
+                pass
+            raise
+        return uri.toString()
+    except Exception as e:
+        _dbg("media_store_insert: wyjatek " + repr(e))
+        return None
+
+
+def save_summary_png(data, name=None):
+    """Zapisuje PNG podsumowania. Zwraca {"path":..., "uri":...}.
+
+    Android: kopia w MusicBox/ (lub katalogu aplikacji) + insert do
+    MediaStore Downloads (galeria + share'owy content:// URI bez FileProvidera).
+    """
+    if not name:
+        import uuid
+
+        name = "podsumowanie_" + uuid.uuid4().hex + ".png"
+    name = os.path.basename(str(name).replace("\\", "/"))
+    if not name.lower().endswith(".png"):
+        name += ".png"
+
+    result = {"path": None, "uri": None}
+    if not _ANDROID:
+        return result
+
+    mdir = musicbox_dir() or external_log_dir()
+    if mdir:
+        path = os.path.join(mdir, name)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            result["path"] = path
+        except OSError as e:
+            _dbg("save_summary_png: write " + repr(e))
+
+    result["uri"] = _media_store_insert_png(data, name)
+    return result
+
+
+def share_file(uri, mime="image/png"):
+    """Udostepnia plik przez systemowy share sheet (ACTION_SEND + chooser)."""
+    if not _ANDROID or not uri:
+        return False
+    try:
+        from jnius import autoclass, cast
+
+        Intent = autoclass("android.content.Intent")
+        String = autoclass("java.lang.String")
+        Uri = autoclass("android.net.Uri")
+        activity = _activity()
+
+        intent = Intent(Intent.ACTION_SEND)
+        intent.setType(String(mime))
+        intent.putExtra(Intent.EXTRA_STREAM, Uri.parse(str(uri)))
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        chooser = Intent.createChooser(
+            intent,
+            cast("java.lang.CharSequence", String("Udostępnij podsumowanie")),
+        )
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activity.startActivity(chooser)
+        return True
+    except Exception as e:
+        _dbg("share_file: wyjatek " + repr(e))
+        return False

@@ -6,13 +6,21 @@ import time
 import pytest
 
 from core.downloader import (
+    _build_id3_tags,
     _duration_s,
+    _ffmpeg_cmd,
     _find_downloaded,
     _run,
+    _track_base,
+    augment_album_tracks,
+    ensure_album,
     load_playlist_file,
+    normalize_download_options,
     parse_csv,
     parse_m3u,
     sanitize_name,
+    search_candidates,
+    single_artist,
     write_m3u,
     write_m3u_copy,
 )
@@ -206,3 +214,303 @@ def test_run_stops_on_stop_event():
     )
     t.join()
     assert result.returncode != 0
+
+
+def test_run_timeout_kills_proc():
+    t0 = time.time()
+    result = _run(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout=2,
+    )
+    assert result.returncode != 0
+    assert time.time() - t0 < 30
+
+
+def test_run_drains_pipes_no_deadlock():
+    code = (
+        "import sys; sys.stderr.write('x'*200000); sys.stderr.flush(); "
+        "sys.stdout.write('y'*200000); sys.stdout.flush()"
+    )
+    t0 = time.time()
+    result = _run([sys.executable, "-c", code], timeout=30)
+    assert result.returncode == 0
+    assert len(result.stdout) == 200000
+    assert len(result.stderr) == 200000
+    assert time.time() - t0 < 25
+
+
+def test_search_candidates_empty_when_search_raises():
+    class BrokenYT:
+        def search(self, *a, **k):
+            raise RuntimeError("timeout")
+
+    assert (
+        search_candidates(BrokenYT(), {"title": "x", "artists": "", "duration_ms": 0})
+        == []
+    )
+
+
+def test_search_candidates_sorts_and_limits():
+    class FakeYT:
+        def search(self, *a, **k):
+            return [
+                {"videoId": "id1", "title": "Foo", "artists": [{"name": "Art"}], "duration": "3:00"},
+                {"videoId": "id2", "title": "Something Else", "artists": [{"name": "Other"}], "duration": "3:00"},
+            ]
+
+    track = {"title": "Foo", "artists": "Art", "duration_ms": 180000}
+    cands = search_candidates(FakeYT(), track, n=1)
+    assert len(cands) == 1
+    assert cands[0]["videoId"] == "id1"
+
+
+def test_download_track_stops_after_deadline(monkeypatch, tmp_path):
+    from core import downloader
+
+    tools = {"yt_dlp": "yt", "ffmpeg": "ff", "deno": "de", "missing": []}
+
+    class FakeYT:
+        def search(self, *a, **k):
+            return [
+                {"videoId": "id%d" % i, "title": "Foo", "artists": [{"name": "Art"}], "duration": "3:00"}
+                for i in range(5)
+            ]
+
+    calls = {"n": 0}
+
+    def fake_download_one(*a, **k):
+        calls["n"] += 1
+        time.sleep(0.6)
+        return {"ok": False, "error": "slow"}
+
+    monkeypatch.setattr(downloader, "_download_one", fake_download_one)
+    result = downloader.download_track(
+        FakeYT(),
+        {"title": "Foo", "artists": "Art", "duration_ms": 180000},
+        str(tmp_path),
+        tools,
+        track_timeout=1,
+    )
+    assert result.get("ok") is False
+    assert calls["n"] < 5
+    assert "Przekroczono czas" in result.get("error", "")
+
+
+def test_ffmpeg_cmd_includes_bitrate():
+    cmd = _ffmpeg_cmd("ffmpeg", "a.webm", "b.mp3", "192k")
+    assert "-b:a" in cmd
+    assert cmd[cmd.index("-b:a") + 1] == "192k"
+    assert "libmp3lame" in cmd
+
+
+def test_normalize_download_options_defaults_and_validation():
+    assert normalize_download_options(None) == {"mp3_bitrate": "320k", "cover_size": 600}
+    assert normalize_download_options({}) == {"mp3_bitrate": "320k", "cover_size": 600}
+    assert normalize_download_options(
+        {"mp3_bitrate": "192k", "cover_size": 300}
+    ) == {"mp3_bitrate": "192k", "cover_size": 300}
+    assert normalize_download_options(
+        {"mp3_bitrate": "banana", "cover_size": -5}
+    ) == {"mp3_bitrate": "320k", "cover_size": 600}
+
+
+def test_download_track_passes_cover_size(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from core import downloader
+
+    tools = {"yt_dlp": "yt", "ffmpeg": "ff", "deno": "de", "missing": []}
+
+    class FakeYT:
+        def search(self, *a, **k):
+            return [{"videoId": "id1", "title": "Foo", "artists": [{"name": "Art"}], "duration": "3:00"}]
+
+    def fake_run(cmd, **kw):
+        if "-o" in cmd:
+            out = str(cmd[cmd.index("-o") + 1])
+            tmp_dir = Path(out).parent
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / "Art - Foo.webm").write_bytes(b"raw")
+
+        class R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return R()
+
+    monkeypatch.setattr(downloader, "_run", fake_run)
+    monkeypatch.setattr(downloader, "_yt_thumbnail_bytes", lambda vid: b"jpeg")
+    captured = {}
+
+    def fake_square(data, size=600):
+        captured["size"] = size
+        return b"sq"
+
+    monkeypatch.setattr(downloader, "_square_cover_bytes", fake_square)
+    monkeypatch.setattr(downloader, "_tag_mp3", lambda *a, **k: None)
+    monkeypatch.setattr(downloader, "_duration_ms_of_file", lambda p: 100000)
+
+    r = downloader.download_track(
+        FakeYT(),
+        {"title": "Foo", "artists": "Art", "duration_ms": 180000},
+        str(tmp_path),
+        tools,
+        options={"mp3_bitrate": "192k", "cover_size": 300},
+    )
+    assert r.get("ok") is True
+    assert captured.get("size") == 300
+
+
+def test_build_id3_tags_track_number_and_genre():
+    tags = _build_id3_tags(
+        {
+            "title": "T",
+            "artists": "A",
+            "album": "Alb",
+            "year": "2024",
+            "genre": "Hip-Hop",
+            "track_no": 3,
+            "disc_no": 1,
+            "total_tracks": 12,
+        },
+        None,
+    )
+    assert tags.getall("TIT2")[0].text == ["T"]
+    assert tags.getall("TPE1")[0].text == ["A"]
+    assert tags.getall("TALB")[0].text == ["Alb"]
+    assert tags.getall("TCON")[0].text == ["Hip-Hop"]
+    assert tags.getall("TRCK")[0].text == ["3/12"]
+    assert tags.getall("TPOS")[0].text == ["1"]
+
+
+def test_build_id3_tags_track_number_without_total():
+    tags = _build_id3_tags({"title": "T", "track_no": 2, "disc_no": 0}, None)
+    assert tags.getall("TRCK")[0].text == ["2"]
+    assert not tags.getall("TPOS")
+
+
+def test_single_artist():
+    assert single_artist("A, B") == "A"
+    assert single_artist("A feat. B") == "A"
+    assert single_artist("A ft B") == "A"
+    assert single_artist("A featuring B") == "A"
+    assert single_artist("Far East Movement, The Cataracs, DEV") == "Far East Movement"
+    assert single_artist("Simon & Garfunkel") == "Simon & Garfunkel"
+    assert single_artist("Earth, Wind & Fire") == "Earth, Wind & Fire"
+    assert single_artist("Rick Astley") == "Rick Astley"
+    assert single_artist("") == ""
+
+
+def test_build_id3_tags_writes_single_artist():
+    tags = _build_id3_tags({"title": "T", "artists": "A, B"}, None)
+    assert tags.getall("TPE1")[0].text == ["A"]
+
+
+def test_track_base_with_track_number():
+    assert _track_base({"artists": "Art", "title": "Foo", "track_no": 3}) == "03 - Art - Foo"
+    assert _track_base({"artists": "Art", "title": "Foo", "track_no": 0}) == "Art - Foo"
+
+
+def test_augment_album_tracks_numbers_and_genre():
+    tracks = [{"title": "A", "artists": "X"}, {"title": "B", "artists": "X"}]
+    out = augment_album_tracks(tracks, "Rock")
+    assert [t["track_no"] for t in out] == [1, 2]
+    assert all(t["total_tracks"] == 2 for t in out)
+    assert all(t["disc_no"] == 1 for t in out)
+    assert all(t["genre"] == "Rock" for t in out)
+    assert "track_no" not in tracks[0]
+
+
+def test_augment_album_tracks_preserves_spotify_numbers():
+    tracks = [{"title": "A", "artists": "X", "track_no": 3, "disc_no": 2}]
+    out = augment_album_tracks(tracks, "Pop")
+    assert out[0]["track_no"] == 3
+    assert out[0]["disc_no"] == 2
+    assert out[0]["total_tracks"] == 1
+
+
+def test_ensure_album_fills_only_missing():
+    tracks = [
+        {"title": "A", "album": "Prawdziwy"},
+        {"title": "B", "album": ""},
+        {"title": "C", "album": None},
+    ]
+    out = ensure_album(tracks, "Fallback")
+    assert out[0]["album"] == "Prawdziwy"
+    assert out[1]["album"] == "Fallback"
+    assert out[2]["album"] == "Fallback"
+    assert tracks[1]["album"] == ""
+
+
+def test_ensure_album_empty_fallback_no_change():
+    tracks = [{"title": "A", "album": ""}]
+    assert ensure_album(tracks, "")[0]["album"] == ""
+
+
+def test_parse_csv_track_and_disc_numbers(tmp_path):
+    p = tmp_path / "a.csv"
+    p.write_text(
+        "Track Name,Artist Name(s),Track Number,Disc Number\n"
+        '"A","X",3,1\n"B","X",4,1\n',
+        encoding="utf-8",
+    )
+    name, tracks = parse_csv(str(p))
+    assert tracks[0]["track_no"] == 3
+    assert tracks[1]["track_no"] == 4
+    assert tracks[0]["disc_no"] == 1
+
+
+def test_download_track_uses_provided_cover(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from core import downloader
+
+    tools = {"yt_dlp": "yt", "ffmpeg": "ff", "deno": "de", "missing": []}
+
+    class FakeYT:
+        def search(self, *a, **k):
+            return [{"videoId": "id1", "title": "Foo", "artists": [{"name": "Art"}], "duration": "3:00"}]
+
+    def fake_run(cmd, **kw):
+        if "-o" in cmd:
+            out = str(cmd[cmd.index("-o") + 1])
+            tmp_dir = Path(out).parent
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / "Art - Foo.webm").write_bytes(b"raw")
+
+        class R:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return R()
+
+    monkeypatch.setattr(downloader, "_run", fake_run)
+    monkeypatch.setattr(
+        downloader,
+        "_yt_thumbnail_bytes",
+        lambda vid: (_ for _ in ()).throw(AssertionError("nie wołać")),
+    )
+    captured = {}
+
+    def fake_square(data, size=600):
+        captured["data"] = data
+        captured["size"] = size
+        return b"sq"
+
+    monkeypatch.setattr(downloader, "_square_cover_bytes", fake_square)
+    monkeypatch.setattr(downloader, "_tag_mp3", lambda *a, **k: None)
+    monkeypatch.setattr(downloader, "_duration_ms_of_file", lambda p: 100000)
+
+    r = downloader.download_track(
+        FakeYT(),
+        {"title": "Foo", "artists": "Art", "duration_ms": 180000},
+        str(tmp_path),
+        tools,
+        options={"mp3_bitrate": "192k", "cover_size": 300},
+        cover_bytes=b"jpegdata",
+    )
+    assert r.get("ok") is True
+    assert captured.get("data") == b"jpegdata"
+    assert captured.get("size") == 300

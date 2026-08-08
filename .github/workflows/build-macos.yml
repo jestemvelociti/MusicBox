@@ -1,0 +1,49 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'ui/**'
+      - 'main.py'
+      - 'MusicBox_macos.spec'
+      - 'build_macos.sh'
+      - '.github/workflows/build-macos.yml'
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    env:
+      MUSICBOX_TOOLS_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install universal2 Python
+        run: |
+          curl -fL -o /tmp/python.pkg "https://www.python.org/ftp/python/3.12.8/python-3.12.8-macos11.pkg"
+          sudo installer -pkg /tmp/python.pkg -target /
+          /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 --version
+          echo "/Library/Frameworks/Python.framework/Versions/3.12/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build universal2 .app
+        run: bash build_macos.sh
+
+      - name: Package .app
+        run: |
+          mkdir -p dist_pkg
+          ditto -c -k --sequesterRsrc dist/MusicBox.app dist_pkg/MusicBox-macOS.zip
+          ls -la dist_pkg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MusicBox-macOS
+          path: dist_pkg/MusicBox-macOS.zip
+          if-no-files-found: error

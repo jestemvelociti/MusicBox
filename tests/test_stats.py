@@ -187,7 +187,9 @@ def test_year_summary_created_on_dec4(stats):
     assert s["artist_counts"] == {"Waima": 1}
     assert s["created_on"] == "2026-12-04"
 
-    assert stats.maybe_create_year_summary(date(2026, 12, 4)) == []
+    # biezacy rok jest odbudowywany przy kazdym odswiezeniu (bez bramki grudnia)
+    assert stats.maybe_create_year_summary(date(2026, 12, 4)) == [2026]
+    assert len(stats.year_summaries()) == 1
 
 
 def test_year_cycle_boundary_december_belongs_to_next_year(stats):
@@ -199,11 +201,18 @@ def test_year_cycle_boundary_december_belongs_to_next_year(stats):
     assert stats.year_summaries()[0]["listening_seconds"] == 100
 
 
-def test_no_summary_before_dec4(stats):
+def test_year_summary_created_midyear(stats):
     stats.create_profile("Jan")
     stats.add_listening(60, today=date(2026, 3, 1))
-    assert stats.maybe_create_year_summary(date(2026, 11, 30)) == []
-    assert stats.year_summaries() == []
+    # biezacy rok dostepny od razu (rok-w-dotychczas), bez czekania do grudnia
+    assert stats.maybe_create_year_summary(date(2026, 11, 30)) == [2026]
+    assert stats.year_summaries()[0]["listening_seconds"] == 60
+
+    # nowe odsluchy odswiezaja podsumowanie biezacego roku
+    stats.add_listening(40, today=date(2026, 8, 1))
+    assert stats.maybe_create_year_summary(date(2026, 11, 30)) == [2026]
+    assert len(stats.year_summaries()) == 1
+    assert stats.year_summaries()[0]["listening_seconds"] == 100
 
 
 def test_catchup_after_missed_trigger_date(stats):

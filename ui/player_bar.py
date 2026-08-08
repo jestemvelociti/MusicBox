@@ -1,5 +1,5 @@
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QPixmap, QRegion
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -12,24 +12,24 @@ from PySide6.QtWidgets import (
 )
 
 SCROLL_INTERVAL_MS = 30
-SCROLL_STEP_PX = 2
+SCROLL_STEP_PX = 1
 SCROLL_HOLD_MS = 1500
 
 
 class ScrollingTitle(QWidget):
-    def __init__(self, text="", parent=None):
+    def __init__(self, text="", parent=None, object_name="titleLabel", height=22):
         super().__init__(parent)
         self._text_width = 0
         self._x = 0
         self._hold_ticks = 0
         self._scrolling = False
 
-        self.setFixedHeight(22)
+        self.setFixedHeight(height)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
 
         self._label = QLabel(self)
-        self._label.setObjectName("titleLabel")
+        self._label.setObjectName(object_name)
         self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self._timer = QTimer(self)
@@ -67,6 +67,9 @@ class ScrollingTitle(QWidget):
 
     def _reposition(self):
         self._label.setGeometry(self._x, 0, self._text_width, self.height())
+        visible = QRect(-self._x, 0, self.width(), self.height())
+        visible = visible.intersected(QRect(0, 0, self._text_width, self.height()))
+        self._label.setMask(QRegion(visible))
 
     def _start_scroll(self):
         if not self._scrolling:
@@ -125,8 +128,11 @@ class PlayerBar(QFrame):
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         self.title_label = ScrollingTitle("Brak utworu")
+        self.artist_label = ScrollingTitle("", object_name="subtitleLabel", height=16)
+        self.artist_label.setVisible(False)
         title_box.addStretch(1)
         title_box.addWidget(self.title_label)
+        title_box.addWidget(self.artist_label)
         title_box.addStretch(1)
 
         left = QWidget()
@@ -224,8 +230,13 @@ class PlayerBar(QFrame):
         )
 
     # --- API dla main_window ---
-    def set_track(self, title, pixmap=None):
-        self.title_label.setText(title)
+    def set_track(self, title, artist=None, pixmap=None):
+        self.title_label.setText(title or "Brak utworu")
+        if artist:
+            self.artist_label.setText(str(artist))
+            self.artist_label.setVisible(True)
+        else:
+            self.artist_label.setVisible(False)
         if pixmap is not None:
             scaled = pixmap.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
                                    Qt.TransformationMode.SmoothTransformation)

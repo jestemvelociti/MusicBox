@@ -3,7 +3,7 @@ from functools import lru_cache
 from mutagen import File
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=64)
 def extract_cover(path):
     try:
         audio = File(path)
@@ -18,11 +18,16 @@ def extract_cover(path):
     for key in tags.keys():
         if key.startswith("APIC"):
             pic = tags[key]
-            if getattr(pic, "data", None):
+            if isinstance(pic, list):
+                for p in pic:
+                    if getattr(p, "data", None):
+                        return p.data
+            elif getattr(pic, "data", None):
                 return pic.data
 
     for pic in getattr(tags, "pictures", []) or []:
-        return pic.data
+        if getattr(pic, "data", None):
+            return pic.data
 
     return None
 

@@ -5,9 +5,6 @@ from datetime import date as _date
 
 _STATS_VERSION = 1
 
-YEAR_SUMMARY_MONTH = 12
-YEAR_SUMMARY_DAY = 4
-
 _MONTH_KEY_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
@@ -80,7 +77,10 @@ def _clean_import_profile(profile):
 
 
 def format_listening(seconds):
-    total = max(0, int(seconds))
+    try:
+        total = max(0, int(seconds or 0))
+    except (TypeError, ValueError):
+        total = 0
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
     if h:
@@ -114,19 +114,27 @@ class Stats:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            profile = data.get("profile")
-            if isinstance(profile, dict):
-                self._data["profile"] = profile
         except (OSError, json.JSONDecodeError):
-            pass
+            return
+        if not isinstance(data, dict):
+            return
+        profile = data.get("profile")
+        if isinstance(profile, dict):
+            self._data["profile"] = _clean_import_profile(profile)
 
     def save(self):
+        tmp = self.path + ".tmp"
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
         except OSError:
-            pass
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
 
     @property
     def has_profile(self):
@@ -283,20 +291,37 @@ class Stats:
         monthly = self._data["profile"].get("monthly") or {}
         if not monthly:
             return []
-        existing = {s.get("year") for s in self.year_summaries()}
-        min_year = min(int(key[:4]) for key in monthly)
+        summaries = self._data["profile"].setdefault("year_summaries", [])
+        existing = {s.get("year") for s in summaries}
+        years = [
+            _to_int(key[:4])
+            for key in monthly
+            if isinstance(key, str) and _MONTH_KEY_RE.match(key)
+        ]
+        if not years:
+            return []
+        min_year = min(years)
         created = []
         for year in range(min_year, today.year + 1):
-            if year in existing:
-                continue
-            if year == today.year and (today.month, today.day) < (YEAR_SUMMARY_MONTH, YEAR_SUMMARY_DAY):
-                continue
-            summary = self._build_year_summary(year)
-            if summary is None:
-                continue
-            summary["created_on"] = today.isoformat()
-            self._data["profile"].setdefault("year_summaries", []).append(summary)
-            created.append(year)
+            if year == today.year:
+                # Biezacy rok: podsumowanie na biezaco (rok-w-dotychczas),
+                # odbudowywane przy kazdym odswiezeniu, by odzwierciedlac nowe odsluchy.
+                summary = self._build_year_summary(year)
+                if summary is None:
+                    continue
+                summary["created_on"] = today.isoformat()
+                summaries[:] = [s for s in summaries if s.get("year") != year]
+                summaries.append(summary)
+                created.append(year)
+            else:
+                if year in existing:
+                    continue
+                summary = self._build_year_summary(year)
+                if summary is None:
+                    continue
+                summary["created_on"] = today.isoformat()
+                summaries.append(summary)
+                created.append(year)
         if created:
             self.save()
         return created

@@ -4,7 +4,14 @@ import subprocess
 import sys
 from datetime import date
 
-from PySide6.QtCore import QFileSystemWatcher, QTimer
+from PySide6.QtCore import (
+    QFileSystemWatcher,
+    QObject,
+    QStandardPaths,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
@@ -25,8 +32,9 @@ from core.library import Library
 from core.media import PlayerEngine
 from core.playlist import Playlist
 from core.stats import Stats
-from core.summary_image import save_summary_card
-from core.tags import display_name
+from core.summary_pillow import save_summary_card
+from core.tags import display_artist, display_name
+from core.version import APP_VERSION, BUILD_DATE
 from ui.add_playlist_view import AddPlaylistView
 from ui.download_view import DownloadView
 from ui.home_view import HomeView, pluralize
@@ -42,10 +50,38 @@ REPEAT_ONE = "one"
 REPEAT_OFF = "off"
 
 
+def _default_dir():
+    d = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DocumentsLocation
+    )
+    return d or os.path.expanduser("~")
+
+
+class _SummaryRenderWorker(QObject):
+    """Render karty podsumowania poza watkiem UI (renderuje + zapisuje PNG)."""
+
+    done = Signal(bool, str, str)  # (ok, path, error)
+
+    def __init__(self, profile_name, label, summary, path):
+        super().__init__()
+        self._profile_name = profile_name
+        self._label = label
+        self._summary = summary
+        self._path = path
+
+    def run(self):
+        try:
+            ok = save_summary_card(self._profile_name, self._label, self._summary, self._path)
+            error = "" if ok else "Nie udało się zapisać obrazu"
+        except Exception as e:
+            ok, error = False, "Nie udało się zapisać obrazu: " + str(e)
+        self.done.emit(ok, self._path, error)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MusicBox")
+        self.setWindowTitle("MusicBox v%s (build %s)" % (APP_VERSION, BUILD_DATE))
         self.resize(980, 600)
         self.setAcceptDrops(True)
 
@@ -114,6 +150,11 @@ class MainWindow(QMainWindow):
             base = sys._MEIPASS
         else:
             base = os.path.join(os.path.dirname(os.path.dirname(__file__)))
+        if sys.platform == "darwin":
+            return [
+                os.path.join(base, "assets", "icon.icns"),
+                os.path.join(base, "assets", "icon.png"),
+            ]
         return [
             os.path.join(base, "assets", "icon.ico"),
             os.path.join(base, "assets", "icon.png"),
@@ -459,6 +500,7 @@ class MainWindow(QMainWindow):
         self.sidebar.libraryRequested.connect(self._show_library_view)
         self.sidebar.statsRequested.connect(self._show_stats_view)
         self.sidebar.addRequested.connect(self._enter_add_mode)
+        self.sidebar.importRequested.connect(self._on_import_playlist)
         self.sidebar.downloadRequested.connect(self._show_download_view)
         self.home_view.playlistClicked.connect(self._open_playlist_from_home)
         self.home_view.addRequested.connect(self._enter_add_mode)
@@ -588,21 +630,25 @@ class MainWindow(QMainWindow):
     def _on_stats_export(self):
         if not self.stats.has_profile:
             return
-        default = os.path.join(os.path.expanduser("~"), "profil.json")
+        start = storage.get_last_dir("profile", _default_dir())
+        default = os.path.join(start, "profil.json")
         path, _ = QFileDialog.getSaveFileName(
             self, "Pobierz profil", default, "JSON (*.json)"
         )
         if path:
+            storage.set_last_dir("profile", os.path.dirname(path))
             if self.stats.export(path):
                 self._set_status(f"Zapisano profil do: {path}")
             else:
                 self._set_status("Nie udało się zapisać profilu")
 
     def _on_stats_import(self):
+        start = storage.get_last_dir("profile", _default_dir())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Wczytaj profil", "", "JSON (*.json)"
+            self, "Wczytaj profil", start, "JSON (*.json)"
         )
         if path:
+            storage.set_last_dir("profile", os.path.dirname(path))
             if self.stats.import_(path):
                 self._set_status(f"Wczytano profil: {self.stats.profile_name}")
                 self.stats_view.refresh(self.stats)
@@ -611,17 +657,32 @@ class MainWindow(QMainWindow):
 
     def _on_stats_image(self, label, summary):
         slug = "".join(c if c.isalnum() else "_" for c in label.lower()).strip("_")
-        default = os.path.join(os.path.expanduser("~"), f"statystyki_{slug}.png")
+        start = storage.get_last_dir("stats_image", _default_dir())
+        default = os.path.join(start, f"statystyki_{slug}.png")
         path, _ = QFileDialog.getSaveFileName(
             self, "Wygeneruj obraz ze statystyk", default, "Obraz PNG (*.png)"
         )
         if not path:
             return
-        ok = save_summary_card(self.stats.profile_name, label, summary, path)
+        storage.set_last_dir("stats_image", os.path.dirname(path))
+        self._set_status("Generowanie obrazu…")
+        self._stats_image_thread = QThread(self)
+        self._stats_image_worker = _SummaryRenderWorker(
+            self.stats.profile_name, label, summary, path
+        )
+        self._stats_image_worker.moveToThread(self._stats_image_thread)
+        self._stats_image_thread.started.connect(self._stats_image_worker.run)
+        self._stats_image_worker.done.connect(self._on_stats_image_done)
+        self._stats_image_worker.done.connect(self._stats_image_thread.quit)
+        self._stats_image_worker.done.connect(self._stats_image_worker.deleteLater)
+        self._stats_image_thread.finished.connect(self._stats_image_thread.deleteLater)
+        self._stats_image_thread.start()
+
+    def _on_stats_image_done(self, ok, path, error):
         if ok:
             self._set_status(f"Zapisano obraz: {path}")
         else:
-            self._set_status("Nie udało się zapisać obrazu")
+            self._set_status(error or "Nie udało się zapisać obrazu")
 
     def _refresh_home(self):
         self.home_view.refresh(self.library.playlists, self.library.current_index)
@@ -694,6 +755,19 @@ class MainWindow(QMainWindow):
             self._set_status("Nie udało się odczytać pliku playlisty")
             return
         self._start_add_flow(playlist)
+
+    def _on_import_playlist(self):
+        start = storage.get_last_dir("import_m3u", _default_dir())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Importuj playlistę",
+            start,
+            "Playlisty (*.m3u *.m3u8);;Wszystkie pliki (*)",
+        )
+        if not path:
+            return
+        storage.set_last_dir("import_m3u", os.path.dirname(path))
+        self._handle_m3u_drop(path)
 
     def _start_add_flow(self, playlist):
         if not playlist.tracks:
@@ -939,6 +1013,7 @@ class MainWindow(QMainWindow):
         playlist = self._current_playlist()
         track = playlist.current() if playlist else None
         title = display_name(track.path, track.title) if track else os.path.basename(path)
+        artist = display_artist(track.path, "") if track else ""
         cover = None
         if track:
             data = extract_cover(track.path)
@@ -946,7 +1021,7 @@ class MainWindow(QMainWindow):
                 pm = QPixmap()
                 if pm.loadFromData(data):
                     cover = pm
-        self.player_bar.set_track(title, cover)
+        self.player_bar.set_track(title, artist, cover)
         self.player_bar.set_playing(not self._restoring_session)
         if playlist and playlist.current_index >= 0:
             self._active_track_list().highlight_current(playlist.current_index)

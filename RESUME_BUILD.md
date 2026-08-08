@@ -4,7 +4,7 @@ Ten plik jest dla mnie (asystenta). Po wpisaniu przez użytkownika „kontynuuj"
 CZYTAJ TEN PLIK i kontynuuj od „AKTUALNY KROK". Nie zaczynaj od nowa.
 
 ## AKTUALNY KROK
-[ 42 ] FIX CRASHA 0.5.1: `NameError: combine_name` (app.py:932 `_display`, cache-hit). Błąd Pythona → wtórny abort SDL. FIX: import `combine_name` w app.py:39. Pierwszy start OK, kolejne crash (cache zapełniony przez build listy → `_restore_resume` trafiał w cache-hit). BUILD 0.5.1 (22:24) + instalacja Moto: 2× start OK, refresh_home 3, meta wysłano, bez crasha. CZEKA NA TEST USERa (mobile lista/pasek/artysta + desktop kolumna).
+[ 46 ] 0.5.4 NA XIAOMI (2506BPN68G, Android 16, serial UKYLPVRW5DCUFUSC). Instalacja adb Success (MIUI nie zablokowało). Boot 0.5.4 OK: api_level=36, android=True, build=0.16s, perms [READ_MEDIA_AUDIO,POST_NOTIFICATIONS]=True/True, bez crasha. IMPORT .m3u OK („młody say10" → 11 utworów). all_files_access=False — import działa bez bramki. NAUKA: na Xiaomi `adb input keyevent` blokowane (INJECT_EVENTS denied); monkey/am start działają. Moto odłączone (0.5.4 czeka na odblokowanie+test). Następne: test podsumowań+share na Xiaomi; potem Moto.
 [ 41 ] WYKONAWCY POD TYTUŁEM + BUILD 0.5.1 (21:57) + exe desktop przebudowany (22:03). APK: musicbox-0.5.1-arm64-v8a_armeabi-v7a-debug.apk
       - mobile/bin/ (bez Pulpitu). Zainstalowany na Moto. CZEKA NA TEST USERa.
       - core/tags.py: display_title/display_artist/combine_name. Mobile: cache [mtime,title,artist]; TrackRow 2 linie (tytuł góra + wykonawcy dół); PlayerBar artist_label (wys. 140); _update_now_label osobno. Desktop: kolumna Wykonawca + filtr; exe przebudowany.
