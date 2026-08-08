@@ -1,10 +1,36 @@
 # Wersja macOS — build i uruchamianie
 
-Aplikacja MusicBox dla macOS (Apple Silicon + Intel, jeden uniwersalny `MusicBox.app`).
-Plik `.app` MUSI powstać na macOS (PyInstaller nie cross-kompiluje z Windows) —
-budujemy go automatycznie w GitHub Actions (chmura macOS).
+Aplikacja MusicBox dla macOS. Plik `.app` MUSI powstać na macOS (PyInstaller
+nie cross-kompiluje z Windows). Build buduje **natywną architekturę**:
+na Macu Apple Silicon (M1/M2/M3…) → `arm64`.
 
-## Opcja A (zalecana): build przez GitHub Actions
+## Opcja A (najprostsza): build lokalnie na Macu — podwójne kliknięcie
+
+1. Skopiuj projekt na Maca (zip przez chmurę albo z GitHuba: Code → Download ZIP).
+2. Rozpakuj.
+3. **2x klik na `MusicBox Build.command`** (otworzy się Terminal).
+4. Czekaj ~10–15 min — skrypt sam: pobiera narzędzia (yt-dlp/ffmpeg/deno),
+   generuje `assets/icon.icns`, instaluje zależności (PySide6, Pillow…),
+   buduje **`dist/MusicBox.app`** i otwiera folder.
+5. Przeciągnij `MusicBox.app` do **Aplikacje**.
+6. Pierwsze uruchomienie (Gatekeeper): **prawy klik → Otwórz**.
+   Jak nie pomoże, w Terminalu: `xattr -dr com.apple.quarantine /ścieżka/do/MusicBox.app`.
+
+Jeśli podwójne kliknięcie nie działa (brak uprawnień wykonywania), uruchom ręcznie:
+```bash
+chmod +x "MusicBox Build.command"
+bash "MusicBox Build.command"
+```
+albo wprost:
+```bash
+bash build_macos.sh
+```
+
+Uwaga: build jest **arm64** (Apple Silicon). Na Macu Intel trzeba zbudować na Macu Intel.
+
+## Opcja B: build przez GitHub Actions (chmura macOS)
+
+Pobierasz gotowy `MusicBox.app` z Actions — przydatne, gdy nie masz Maka pod ręką.
 
 ### Krok 1 — wypchnij projekt na GitHub
 Jeśli repo nie ma zdalnego:
@@ -38,24 +64,10 @@ Workflow odpala się też automatycznie przy `push` zmieniającym `core/`, `ui/`
    pobieranie z CSV / linku Spotify, tryb album, tagi (TALB/TRCK 1/12/TCON),
    ustawienia, pasek z autorem i przewijaniem.
 
-## Opcja B: build lokalnie na Macu
-
-```bash
-chmod +x build_macos.sh
-./build_macos.sh
-# wynik: dist/MusicBox.app
-```
-
-Wymagania na Macu:
-- Python **universal2** (np. z https://www.python.org/downloads/macos/).
-- `iconutil` (wbudowany w macOS).
-- Sieć (pobieranie narzędzi yt-dlp/ffmpeg/deno do `bin/macos/arm64` + `x86_64`).
-
-Jeśli pobranie narzędzi się nie powiedzie, skrypt ostrzega i apka użyje narzędzi
-z PATH (np. `brew install ffmpeg deno yt-dlp`).
-
 ## Co robi `MusicBox_macos.spec`
-- `Analysis(target_arch='universal2')` → jeden plik binarny z obiema architekturami.
+- Buduje `.app` **natywnie** (na M1 = arm64) — bez universal2, dzięki czemu
+  nie ma problemów z architekturą zależności (np. Pillow).
 - `BUNDLE` → `MusicBox.app` (windowed, ikona `assets/icon.icns`, bundle id `org.musicbox.musicbox`).
-- `bin/` (z narzędziami per arch) bundlowane do apki; aplikacja wybiera narzędzia
-  wg `platform.machine()` (`bin/macos/arm64` vs `bin/macos/x86_64`).
+- `bin/` (narzędzia yt-dlp/ffmpeg/deno) bundlowane do apki; aplikacja wybiera
+  narzędzia wg `platform.machine()` (`bin/macos/arm64` vs `bin/macos/x86_64`).
+

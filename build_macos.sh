@@ -1,12 +1,27 @@
 #!/bin/bash
-# Build wersji macOS (universal2 .app) — uruchamiane na Macu.
-#   chmod +x build_macos.sh && ./build_macos.sh
+# Build wersji macOS (natywny arch — na M1 arm64) — uruchamiane na Macu.
+# Najprościej: 2x klik na „MusicBox Build.command".
 # Wynik: dist/MusicBox.app
 set -e
 
 cd "$(dirname "$0")"
 echo "=== MusicBox macOS build ==="
 echo "host arch: $(uname -m)"
+
+# ---------- Python ----------
+PY="$(command -v python3 || command -v python)"
+if [ -z "$PY" ]; then
+    echo "[py] BRAK Pythona. Zainstaluj z https://www.python.org/downloads/macos/ i uruchom ponownie."
+    exit 1
+fi
+VER="$($PY -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 0.0)"
+MAJOR="${VER%%.*}"; MINOR="${VER#*.}"
+if [ "${MAJOR:-0}" -ge 3 ] && [ "${MINOR:-0}" -ge 10 ]; then
+    echo "[py] OK: python $VER ($PY)"
+else
+    echo "[py] Python $VER — za stary (potrzebny 3.10+). Zainstaluj nowy z https://www.python.org/downloads/macos/."
+    exit 1
+fi
 
 mkdir -p bin/macos/arm64 bin/macos/x86_64
 
@@ -83,7 +98,6 @@ if [ ! -f assets/icon.icns ] && command -v iconutil >/dev/null 2>&1; then
 fi
 
 # ---------- Python + deps ----------
-PY="$(command -v python3 || command -v python)"
 echo "[py] $($PY --version) arch=$(uname -m)"
 $PY -m pip install --upgrade pip >/dev/null
 $PY -m pip install -r requirements.txt -r requirements-dev.txt
