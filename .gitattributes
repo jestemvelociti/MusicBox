@@ -1,0 +1,7 @@
+# Pliki bash/build zawsze z końcami LF (inaczej macOS/Linux bash pada na CRLF)
+*.sh text eol=lf
+*.command text eol=lf
+*.spec text eol=lf
+.github/** text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

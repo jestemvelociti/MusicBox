@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Build na macOS: python -m PyInstaller MusicBox_macos.spec --noconfirm
-# Wymaga Pythona universal2 + PySide6 (universal wheel) + assets/icon.icns.
+# Buduje .app NATYWNE (na M1 = arm64). Najprościej przez `MusicBox Build.command`.
 
 from PyInstaller.utils.hooks import collect_data_files
 
@@ -20,7 +20,6 @@ a = Analysis(
     excludes=[],
     noarchive=False,
     optimize=0,
-    target_arch='universal2',
 )
 pyz = PYZ(a.pure)
 
