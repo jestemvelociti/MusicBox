@@ -440,12 +440,21 @@ def _run(cmd, env=None, timeout=None, stop_event=None):
 
 
 def _yt_thumbnail_bytes(video_id, timeout=12):
+    import ssl
     import urllib.request
+
+    def _context():
+        try:
+            import certifi
+
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            return ssl.create_default_context()
 
     for size in ("maxresdefault", "sddefault", "hqdefault", "mqdefault", "default"):
         url = f"https://i.ytimg.com/vi/{video_id}/{size}.jpg"
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
+            with urllib.request.urlopen(url, timeout=timeout, context=_context()) as r:
                 data = r.read()
             if len(data) > 1024:
                 return data

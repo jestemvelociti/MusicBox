@@ -1,5 +1,6 @@
 import json
 import re
+import ssl
 import urllib.parse
 import urllib.request
 
@@ -11,9 +12,19 @@ class SpotifyError(Exception):
     pass
 
 
+def _ssl_context():
+    """Kontekst SSL z CA bundle z certifi (działa w PyInstaller exe)."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _http_json(url, data=None, headers=None, timeout=20):
     req = urllib.request.Request(url, data=data, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
@@ -111,7 +122,7 @@ def _resolve_playlist_embed(spot_id, timeout):
           "Chrome/126.0 Safari/537.36")
     url = "https://open.spotify.com/embed/playlist/%s" % spot_id
     req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept-Language": "en"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
         html = r.read().decode("utf-8", "replace")
     m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.S)
     if not m:

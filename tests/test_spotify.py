@@ -124,7 +124,7 @@ def test_resolve_playlist_embed(monkeypatch):
         def __exit__(self, *a):
             return None
 
-    def fake_urlopen(req, timeout=20):
+    def fake_urlopen(req, timeout=20, context=None):
         return FakeResp()
 
     monkeypatch.setattr(spotify.urllib.request, "urlopen", fake_urlopen)
@@ -135,3 +135,33 @@ def test_resolve_playlist_embed(monkeypatch):
     assert len(tracks) == 2
     assert tracks[0]["title"] == "T1" and tracks[0]["artists"] == "A1"
     assert tracks[0]["duration_ms"] == 100000
+
+
+def test_http_json_uses_ssl_context(monkeypatch):
+    ctx = object()
+
+    def fake_create_default_context(**kw):
+        assert kw.get("cafile"), "brak cafile (certifi)"
+        return ctx
+
+    monkeypatch.setattr(spotify.ssl, "create_default_context", fake_create_default_context)
+
+    captured = {}
+
+    class FakeResp:
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    def fake_urlopen(req, timeout=20, context=None):
+        captured["context"] = context
+        return FakeResp()
+
+    monkeypatch.setattr(spotify.urllib.request, "urlopen", fake_urlopen)
+    spotify._http_json("https://example.com")
+    assert captured["context"] is ctx
